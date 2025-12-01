@@ -101,6 +101,7 @@ Thumbs.db
 
 # Project specific
 workspace/
+!frontend/src/components/workspace/
 *.db
 *.sqlite
 *.sqlite3
