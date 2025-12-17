@@ -61,10 +61,27 @@ def encrypt_value(plaintext: str, key: Union[str, bytes]) -> str:
     return "enc:" + payload
 
 
+def _strip_prefix(value: str) -> str:
+    """
+    Accept both canonical 'enc:v1|...' and legacy 'encv1|...' payloads.
+    """
+    if value.startswith("enc:"):
+        return value[len("enc:") :]
+    if value.startswith("enc") and len(value) > 3:
+        # Handle colon-less format like 'encv1|master|...'
+        body = value[3:]
+        if body.startswith(":"):
+            body = body[1:]
+        return body
+    raise CryptoError("not encrypted")
+
+
+def is_encrypted_string(value: str) -> bool:
+    return isinstance(value, str) and (value.startswith("enc:") or value.startswith("encv"))
+
+
 def _parse_encrypted(value: str) -> Tuple[str, str, int, bytes, bytes, bytes]:
-    if not value.startswith("enc:"):
-        raise CryptoError("not encrypted")
-    body = value[len("enc:") :]
+    body = _strip_prefix(value)
     parts = body.split("|")
     if len(parts) != 6:
         raise CryptoError("invalid payload format")

@@ -28,7 +28,7 @@ function App() {
 
   useEffect(() => {
     LiteAPI.getWorkspaceStatus()
-      .then(({ locked, legacy }) => setStatus(locked, legacy))
+      .then(({ locked, legacy, has_vault, ciphertext }) => setStatus(locked, legacy, has_vault, ciphertext))
       .catch(() => setStatus(false, false));
   }, [workspace?.path, setStatus]);
 

@@ -116,4 +116,4 @@ Issues and Pull Requests are welcome!
 3.  Submit a PR.
 
 ---
-© 2025 JTechMinds LLC. MIT License.
+Built with Care by Jordan Gonzales - © 2025 JTechMinds LLC. MIT License.

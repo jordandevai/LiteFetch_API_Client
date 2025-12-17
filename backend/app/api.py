@@ -211,9 +211,10 @@ async def init_workspace_git():
 @router.get("/workspace/status")
 async def get_workspace_status():
     vault_path = storage.base_dir / ".litefetch" / "vault.key"
-    locked = vault_path.exists() and storage.master_key is None
+    ciphertext = storage.has_encrypted_payloads_without_key()
+    locked = (vault_path.exists() and storage.master_key is None) or ciphertext
     legacy = storage.has_legacy_inline_encryption()
-    return {"locked": locked, "legacy": legacy, "has_vault": vault_path.exists()}
+    return {"locked": locked, "legacy": legacy, "has_vault": vault_path.exists(), "ciphertext": ciphertext}
 
 
 @router.post("/workspace/unlock")

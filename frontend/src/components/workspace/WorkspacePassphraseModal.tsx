@@ -14,6 +14,7 @@ export const WorkspacePassphraseModal = () => {
     isLocked,
     legacyMode,
     hasVault,
+    hasCiphertext,
     setUnlocked,
     modalOpen,
     closeModal,
@@ -165,6 +166,16 @@ export const WorkspacePassphraseModal = () => {
     }
   }, [isLocked, legacyMode, openModal]);
 
+  const statusMessage = legacyMode
+    ? 'Legacy secrets detected. Enter passphrase to migrate and unlock.'
+    : hasCiphertext
+    ? 'Encrypted secrets detected but the workspace key is not loaded. Enter the passphrase to decrypt before sending requests.'
+    : isLocked
+    ? 'Workspace is locked. Enter passphrase to continue.'
+    : hasVault
+    ? 'Manage workspace folder or unlock with passphrase.'
+    : 'New workspace detected. Set a passphrase to encrypt data, or continue without encryption.';
+
   const handleMigrate = async () => {
     setError(null);
     setMigrateNote(null);
@@ -206,15 +217,7 @@ export const WorkspacePassphraseModal = () => {
             </button>
           )}
         </div>
-        <div className="text-xs text-muted-foreground">
-          {legacyMode
-            ? 'Legacy secrets detected. Enter passphrase to migrate and unlock.'
-            : isLocked
-            ? 'Workspace is locked. Enter passphrase to continue.'
-            : hasVault
-            ? 'Manage workspace folder or unlock with passphrase.'
-            : 'New workspace detected. Set a passphrase to encrypt data, or continue without encryption.'}
-        </div>
+        <div className="text-xs text-muted-foreground">{statusMessage}</div>
         {error && <div className="text-xs text-destructive bg-destructive/10 px-2 py-1 rounded">{error}</div>}
         <div className="space-y-4">
           <div className="space-y-1">
@@ -296,7 +299,7 @@ export const WorkspacePassphraseModal = () => {
                   type="button"
                   className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors disabled:opacity-50"
                   onClick={() => closeModal()}
-                  disabled={busyUnlock || busySwitch || busyRotate || busyMigrate}
+                  disabled={busyUnlock || busySwitch || busyRotate || busyMigrate || isLocked || legacyMode || hasCiphertext}
                 >
                   Continue without encryption
                 </button>
