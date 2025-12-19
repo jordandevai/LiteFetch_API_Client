@@ -194,7 +194,9 @@ export const LiteAPI = {
   },
   getWorkspaceStatus: async () => {
     const client = await getApiClient();
-    return client.get<{ locked: boolean; legacy: boolean; has_vault?: boolean }>(`/workspace/status`).then((r) => r.data);
+    return client
+      .get<{ locked: boolean; legacy: boolean; has_vault?: boolean; ciphertext?: boolean }>(`/workspace/status`)
+      .then((r) => r.data);
   },
   unlockWorkspace: async (passphrase: string) => {
     const client = await getApiClient();

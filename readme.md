@@ -21,22 +21,22 @@ Architected with **Tauri v2**, it combines the performance of a native Rust desk
 
 ## Key Features
 
-### 🛠️ Powerful Request Editor
+### Powerful Request Editor
 *   **Full Method Support:** GET, POST, PUT, DELETE, PATCH, and more.
 *   **Body Masters:** First-class support for `JSON`, `Form-Data` (with file uploads), `x-www-form-urlencoded`, and `Raw` text.
 *   **Auth Built-in:** Native support for Basic Auth and Bearer Tokens.
 *   **Cookie Jar:** Automatic per-environment cookie management (like a real browser).
 
-### 🔗 "Auto-Magic" Request Chaining
+### "Auto-Magic" Request Chaining
 Stop copy-pasting tokens manually. Use **JMESPath** rules to extract data from a response and inject it into your environment variables automatically.
 *   *Example:* Login -> Extract `body.token` -> Save to `{{access_token}}` -> Use in next request.
 
-### 🌍 Dynamic Environments
+### Dynamic Environments
 *   Manage sets of variables (`dev`, `staging`, `prod`).
 *   Inject variables anywhere: URL, Headers, Body, or Auth fields using `{{variable_name}}` syntax.
 *   **Dynamic Generators:** Use `{{$uuid}}`, `{{$timestamp}}`, and `{{$randomInt}}` for testing.
 
-### 📥 Migration Ready
+### Migration Ready
 *   **Postman Import:** Import existing Postman collections (v2.1) in seconds.
 *   **History Tracking:** Never lose a request. Auto-saves your last 50 executions.
 
@@ -57,7 +57,7 @@ sudo apt update && sudo apt install -y \
     libssl-dev curl wget file pkg-config patchelf
 ```
 
-### 🏃‍♂️ Run in Development Mode
+### Run in Development Mode
 This starts the Rust shell, compiles the React frontend with HMR, and spawns the Python backend automatically.
 
 ```bash
@@ -77,7 +77,7 @@ npm run tauri:dev
 
 ---
 
-## 📦 Building for Production
+## Building for Production
 
 We provide a one-shot script that handles the entire pipeline: building the Python sidecar (via PyInstaller), compiling the React assets, and bundling the Tauri installer (`.deb` or `.exe`).
 
@@ -116,4 +116,4 @@ Issues and Pull Requests are welcome!
 3.  Submit a PR.
 
 ---
-© 2025 JTechMinds LLC. MIT License.
+Built with Care by Jordan Gonzales - © 2025 JTechMinds LLC. MIT License.

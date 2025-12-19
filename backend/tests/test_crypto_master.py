@@ -17,3 +17,11 @@ def test_legacy_round_trip():
     passphrase = "hunter2"
     cipher = encrypt_value("secret", passphrase)
     assert decrypt_value(cipher, passphrase) == "secret"
+
+
+def test_master_round_trip_colonless_prefix():
+    master = os.urandom(KEY_LEN)
+    cipher = encrypt_value("secret", master)
+    compat_cipher = cipher.replace("enc:", "enc", 1)
+    assert compat_cipher.startswith("encv1|")
+    assert decrypt_value(compat_cipher, master) == "secret"

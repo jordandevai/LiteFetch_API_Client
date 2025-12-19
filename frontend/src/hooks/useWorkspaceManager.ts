@@ -62,8 +62,8 @@ export const useWorkspaceManager = () => {
 
     try {
       const status = await fetchStatusWithRetry();
-      setLockStatus(status.locked, status.legacy, (status as any).has_vault ?? true);
-      if (status.locked || status.legacy || !(status as any).has_vault) {
+      setLockStatus(status.locked, status.legacy, (status as any).has_vault ?? true, (status as any).ciphertext);
+      if (status.locked || status.legacy || !(status as any).has_vault || (status as any).ciphertext) {
         openLockModal();
         return resolvedPath;
       }

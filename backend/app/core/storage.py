@@ -24,6 +24,7 @@ from app.core.crypto import (
     CryptoError,
     _derive_key,
     _parse_encrypted,
+    is_encrypted_string,
     KDF_NAME,
     KEY_LEN,
 )
@@ -264,7 +265,7 @@ class StorageEngine:
         secret_headers = getattr(r, "secret_headers", {}) or {}
         next_headers = {}
         for k, v in (r.headers or {}).items():
-            if secret_headers.get(k) and isinstance(v, str) and not v.startswith("enc:"):
+            if secret_headers.get(k) and isinstance(v, str) and not is_encrypted_string(v):
                 next_headers[k] = encrypt_value(v, self.master_key)
             else:
                 next_headers[k] = v
@@ -277,7 +278,7 @@ class StorageEngine:
             row_copy = dict(row)
             key = row_copy.get("key") or ""
             val = row_copy.get("value")
-            if secret_q.get(key) and isinstance(val, str) and not str(val).startswith("enc:"):
+            if secret_q.get(key) and isinstance(val, str) and not is_encrypted_string(str(val)):
                 row_copy["value"] = encrypt_value(str(val), self.master_key)
             next_q.append(row_copy)
         r.query_params = next_q
@@ -291,7 +292,7 @@ class StorageEngine:
             val = row_copy.get("value")
             row_type = (row_copy.get("type") or "text").lower()
             # Only encrypt textual form values; do not encrypt file paths or blobs
-            if row_type == "text" and secret_form.get(key) and isinstance(val, str) and not str(val).startswith("enc:"):
+            if row_type == "text" and secret_form.get(key) and isinstance(val, str) and not is_encrypted_string(str(val)):
                 row_copy["value"] = encrypt_value(str(val), self.master_key)
             next_form.append(row_copy)
         r.form_body = next_form
@@ -300,7 +301,7 @@ class StorageEngine:
         secret_auth = getattr(r, "secret_auth_params", {}) or {}
         next_auth = {}
         for k, v in (r.auth_params or {}).items():
-            if secret_auth.get(k) and isinstance(v, str) and not v.startswith("enc:"):
+            if secret_auth.get(k) and isinstance(v, str) and not is_encrypted_string(v):
                 next_auth[k] = encrypt_value(v, self.master_key)
             else:
                 next_auth[k] = v
@@ -309,7 +310,7 @@ class StorageEngine:
         # Body
         if getattr(r, "secret_body", False):
             body_val = r.body
-            if isinstance(body_val, str) and not body_val.startswith("enc:"):
+            if isinstance(body_val, str) and not is_encrypted_string(body_val):
                 r.body = encrypt_value(body_val, self.master_key)
             elif isinstance(body_val, dict):
                 try:
@@ -327,7 +328,7 @@ class StorageEngine:
         secret_headers = getattr(r, "secret_headers", {}) or {}
         next_headers = {}
         for k, v in (r.headers or {}).items():
-            if secret_headers.get(k) and isinstance(v, str) and v.startswith("enc:"):
+            if secret_headers.get(k) and isinstance(v, str) and is_encrypted_string(v):
                 try:
                     next_headers[k] = decrypt_value(v, self.master_key)
                 except CryptoError:
@@ -343,7 +344,7 @@ class StorageEngine:
             row_copy = dict(row)
             key = row_copy.get("key") or ""
             val = row_copy.get("value")
-            if secret_q.get(key) and isinstance(val, str) and val.startswith("enc:"):
+            if secret_q.get(key) and isinstance(val, str) and is_encrypted_string(val):
                 try:
                     row_copy["value"] = decrypt_value(val, self.master_key)
                 except CryptoError:
@@ -359,7 +360,7 @@ class StorageEngine:
             key = row_copy.get("key") or ""
             val = row_copy.get("value")
             row_type = (row_copy.get("type") or "text").lower()
-            if row_type == "text" and secret_form.get(key) and isinstance(val, str) and val.startswith("enc:"):
+            if row_type == "text" and secret_form.get(key) and isinstance(val, str) and is_encrypted_string(val):
                 try:
                     row_copy["value"] = decrypt_value(val, self.master_key)
                 except CryptoError:
@@ -371,7 +372,7 @@ class StorageEngine:
         secret_auth = getattr(r, "secret_auth_params", {}) or {}
         next_auth = {}
         for k, v in (r.auth_params or {}).items():
-            if secret_auth.get(k) and isinstance(v, str) and v.startswith("enc:"):
+            if secret_auth.get(k) and isinstance(v, str) and is_encrypted_string(v):
                 try:
                     next_auth[k] = decrypt_value(v, self.master_key)
                 except CryptoError:
@@ -381,7 +382,7 @@ class StorageEngine:
         r.auth_params = next_auth
 
         # Body
-        if getattr(r, "secret_body", False) and isinstance(r.body, str) and r.body.startswith("enc:"):
+        if getattr(r, "secret_body", False) and isinstance(r.body, str) and is_encrypted_string(r.body):
             try:
                 raw = decrypt_value(r.body, self.master_key)
                 try:
@@ -408,6 +409,68 @@ class StorageEngine:
                 transformed = fn(req_obj)
                 result.append(transformed)
         return result
+
+    def _walk_requests_any(self, items: list, predicate) -> bool:
+        """
+        Walk the request tree and return True on the first match for predicate.
+        """
+        for item in items:
+            if isinstance(item, dict) and "items" in item:
+                if self._walk_requests_any(item.get("items", []), predicate):
+                    return True
+            elif hasattr(item, "items"):
+                if self._walk_requests_any(getattr(item, "items", []) or [], predicate):
+                    return True
+            else:
+                req_obj = item if hasattr(item, "id") else item
+                if predicate(req_obj):
+                    return True
+        return False
+
+    def _request_contains_encrypted_secret(self, req: Any) -> bool:
+        secret_headers = getattr(req, "secret_headers", {}) or {}
+        for k, v in (getattr(req, "headers", {}) or {}).items():
+            if secret_headers.get(k) and isinstance(v, str) and is_encrypted_string(v):
+                return True
+
+        secret_q = getattr(req, "secret_query_params", {}) or {}
+        for row in getattr(req, "query_params", []) or []:
+            key = (row or {}).get("key") or ""
+            val = (row or {}).get("value")
+            if secret_q.get(key) and isinstance(val, str) and is_encrypted_string(val):
+                return True
+
+        secret_form = getattr(req, "secret_form_fields", {}) or {}
+        for row in getattr(req, "form_body", []) or []:
+            key = (row or {}).get("key") or ""
+            val = (row or {}).get("value")
+            row_type = ((row or {}).get("type") or "text").lower()
+            if row_type == "text" and secret_form.get(key) and isinstance(val, str) and is_encrypted_string(val):
+                return True
+
+        secret_auth = getattr(req, "secret_auth_params", {}) or {}
+        for k, v in (getattr(req, "auth_params", {}) or {}).items():
+            if secret_auth.get(k) and isinstance(v, str) and is_encrypted_string(v):
+                return True
+
+        if getattr(req, "secret_body", False) and isinstance(getattr(req, "body", None), str):
+            if is_encrypted_string(getattr(req, "body")):
+                return True
+        return False
+
+    def _collection_contains_encrypted_secrets(self, col: Collection) -> bool:
+        return self._walk_requests_any(col.items or [], self._request_contains_encrypted_secret)
+
+    def _environment_contains_encrypted_secrets(self, env_file: EnvironmentFile) -> bool:
+        for env_obj in env_file.envs.values():
+            secrets_map = getattr(env_obj, "secrets", {}) or {}
+            for key, is_secret in secrets_map.items():
+                if not is_secret:
+                    continue
+                val = env_obj.variables.get(key)
+                if isinstance(val, str) and is_encrypted_string(val):
+                    return True
+        return False
 
     def reencrypt_sensitive(self) -> Dict[str, int]:
         """
@@ -536,6 +599,9 @@ class StorageEngine:
             raw = json.load(f)
         data, was_wrapped = self._maybe_decrypt_wrapper(raw)
         col = Collection(**data)
+        if not self.master_key and self._collection_contains_encrypted_secrets(col):
+            # Ciphertext present but no key loaded; surface lock state instead of leaking ciphertext.
+            raise VaultLockedError("workspace locked")
         if self.master_key:
             col.items = self._walk_requests(col.items or [], self._decrypt_request_secrets)
         # If we unwrapped a legacy encrypted blob, rewrite in new format
@@ -564,6 +630,8 @@ class StorageEngine:
         data, was_wrapped = self._maybe_decrypt_wrapper(raw)
         env_file = EnvironmentFile(**data)
         if not self.master_key:
+            if self._environment_contains_encrypted_secrets(env_file):
+                raise VaultLockedError("workspace locked")
             return env_file
 
         for env_obj in env_file.envs.values():
@@ -572,7 +640,7 @@ class StorageEngine:
                 if not is_secret:
                     continue
                 val = env_obj.variables.get(key)
-                if isinstance(val, str) and val.startswith("enc:"):
+                if isinstance(val, str) and is_encrypted_string(val):
                     try:
                         env_obj.variables[key] = decrypt_value(val, self.master_key)
                     except CryptoError:
@@ -595,7 +663,7 @@ class StorageEngine:
                     if not is_secret:
                         continue
                     val = env_obj.variables.get(key)
-                    if isinstance(val, str) and val.startswith("enc:"):
+                    if isinstance(val, str) and is_encrypted_string(val):
                         # already encrypted, leave as-is
                         continue
                     if isinstance(val, str):
@@ -712,13 +780,55 @@ class StorageEngine:
                     if not is_secret:
                         continue
                     val = (env_obj or {}).get("variables", {}).get(key)
-                    if isinstance(val, str) and val.startswith("enc:"):
+                    if isinstance(val, str) and is_encrypted_string(val):
                         try:
                             _, kdf_name, _, _, _, _ = _parse_encrypted(val)
                         except CryptoError:
                             continue
                         if kdf_name == KDF_NAME:
                             return True
+        return False
+
+    def has_encrypted_payloads_without_key(self) -> bool:
+        """
+        Detect inline ciphertext when no master key is loaded so we can signal
+        the UI to unlock instead of leaking ciphertext into requests.
+        """
+        if self.master_key:
+            return False
+        if self.is_locked():
+            return True
+
+        for cdir in self.collections_dir.iterdir():
+            if not cdir.is_dir():
+                continue
+            cid = cdir.name
+            collection_path = self._collection_path(cid)
+            env_path = self._env_path(cid)
+
+            if collection_path.exists():
+                try:
+                    with open(collection_path, "r", encoding="utf-8") as f:
+                        raw_col = json.load(f)
+                    if isinstance(raw_col, dict) and "ciphertext" in raw_col:
+                        return True
+                    col = Collection(**raw_col)
+                    if self._collection_contains_encrypted_secrets(col):
+                        return True
+                except Exception:
+                    pass
+
+            if env_path.exists():
+                try:
+                    with open(env_path, "r", encoding="utf-8") as f:
+                        raw_env = json.load(f)
+                    if isinstance(raw_env, dict) and "ciphertext" in raw_env:
+                        return True
+                    env_file = EnvironmentFile(**raw_env)
+                    if self._environment_contains_encrypted_secrets(env_file):
+                        return True
+                except Exception:
+                    pass
         return False
 
     def migrate_legacy_environments(self, passphrase: str, master: bytes) -> Dict[str, int]:
@@ -737,7 +847,7 @@ class StorageEngine:
                     if not is_secret:
                         continue
                     val = (env_obj or {}).get("variables", {}).get(key)
-                    if isinstance(val, str) and val.startswith("enc:"):
+                    if isinstance(val, str) and is_encrypted_string(val):
                         try:
                             _, kdf_name, _, _, _, _ = _parse_encrypted(val)
                         except CryptoError:
