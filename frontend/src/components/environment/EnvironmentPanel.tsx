@@ -4,6 +4,8 @@ import { useEnvironmentQuery, useSaveEnvironmentMutation } from '../../hooks/use
 import type { EnvironmentFile } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { useWorkspaceLockStore } from '../../stores/useWorkspaceLockStore';
+import { renameKeyInMap, uniqueKey } from '../../lib/forms/stableRows';
+import { useUnsavedChangesGuard } from '../../lib/state/useUnsavedChangesGuard';
 
 type EnvPanelProps = {
   open: boolean;
@@ -21,18 +23,23 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
   const { data } = useEnvironmentQuery();
   const { mutateAsync: saveEnv, isPending } = useSaveEnvironmentMutation();
   const [localEnv, setLocalEnv] = useState<EnvironmentFile>(emptyEnvFile);
+  const [isDirty, setIsDirty] = useState(false);
   const [status, setStatus] = useState<{ tone: 'info' | 'success' | 'error'; message: string } | null>(null);
   const { isLocked } = useWorkspaceLockStore();
+  const { confirmDiscard } = useUnsavedChangesGuard();
+  const markDirty = () => setIsDirty(true);
 
   // keep local copy for editing
   useEffect(() => {
-    if (data) setLocalEnv(data);
-  }, [data]);
+    if (!open || !data || isDirty) return;
+    setLocalEnv(data);
+  }, [data, isDirty, open]);
 
   const envNames = useMemo(() => Object.keys(localEnv.envs || {}), [localEnv]);
   const activeEnvKey = localEnv.active_env;
   const activeEnv = localEnv.envs[activeEnvKey] || { name: activeEnvKey, variables: {}, secrets: {} };
   const addEnv = () => {
+    markDirty();
     const base = 'env';
     let idx = 1;
     while (localEnv.envs[`${base}-${idx}`]) idx += 1;
@@ -49,7 +56,8 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
   };
 
   const addVar = () => {
-    const key = 'KEY';
+    markDirty();
+    const key = uniqueKey(Object.keys(activeEnv.variables || {}), 'KEY');
     const next = {
       ...localEnv,
       envs: {
@@ -65,9 +73,8 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
   };
 
   const updateVar = (k: string, v: string) => {
-    const nextVars = { ...activeEnv.variables };
-    delete nextVars[k];
-    nextVars[k] = v;
+    markDirty();
+    const nextVars = { ...activeEnv.variables, [k]: v };
     const next = {
       ...localEnv,
       envs: {
@@ -82,16 +89,11 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
   };
 
   const renameVar = (oldKey: string, newKey: string) => {
-    const trimmed = newKey.trim();
-    if (!trimmed) return;
-    const nextVars = { ...activeEnv.variables };
-    const val = nextVars[oldKey];
-    const nextSecrets = { ...(activeEnv.secrets || {}) };
-    const secretFlag = nextSecrets[oldKey];
-    delete nextVars[oldKey];
-    delete nextSecrets[oldKey];
-    nextVars[trimmed] = val;
-    if (secretFlag !== undefined) nextSecrets[trimmed] = secretFlag;
+    markDirty();
+    if (!newKey || oldKey === newKey) return;
+    if (Object.prototype.hasOwnProperty.call(activeEnv.variables || {}, newKey)) return;
+    const nextVars = renameKeyInMap(activeEnv.variables || {}, oldKey, newKey);
+    const nextSecrets = renameKeyInMap(activeEnv.secrets || {}, oldKey, newKey);
     const next = {
       ...localEnv,
       envs: {
@@ -103,6 +105,7 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
   };
 
   const removeVar = (key: string) => {
+    markDirty();
     const nextVars = { ...activeEnv.variables };
     const nextSecrets = { ...(activeEnv.secrets || {}) };
     delete nextVars[key];
@@ -118,42 +121,22 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
   };
 
   const renameEnv = (newName: string) => {
-    const trimmed = newName.trim() || activeEnvKey;
-    if (trimmed === activeEnvKey) {
-      setLocalEnv((prev) => ({
-        ...prev,
-        envs: { ...prev.envs, [activeEnvKey]: { ...activeEnv, name: trimmed } },
-      }));
-      return;
-    }
-
-    // Ensure unique key
-    let candidate = trimmed;
-    let counter = 1;
-    while (localEnv.envs[candidate]) {
-      candidate = `${trimmed}-${counter}`;
-      counter += 1;
-    }
-
-    const { [activeEnvKey]: _unused, ...rest } = localEnv.envs; // eslint-disable-line @typescript-eslint/no-unused-vars
-    const nextEnvs = {
-      ...rest,
-      [candidate]: { ...activeEnv, name: trimmed },
-    };
-    setLocalEnv({
-      ...localEnv,
-      active_env: candidate,
-      envs: nextEnvs,
-    });
+    markDirty();
+    setLocalEnv((prev) => ({
+      ...prev,
+      envs: { ...prev.envs, [activeEnvKey]: { ...activeEnv, name: newName } },
+    }));
   };
 
   const handleSave = async () => {
     await saveEnv(localEnv);
+    setIsDirty(false);
     setStatus({ tone: 'success', message: 'Environment saved' });
     onClose();
   };
 
   const toggleSecret = (key: string) => {
+    markDirty();
     const nextSecrets = { ...(activeEnv.secrets || {}) };
     nextSecrets[key] = !nextSecrets[key];
     setLocalEnv((prev) => ({
@@ -163,6 +146,16 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
         [activeEnvKey]: { ...activeEnv, secrets: nextSecrets },
       },
     }));
+  };
+
+  const handleClose = () => {
+    const shouldClose = confirmDiscard({
+      isDirty,
+      message: 'Discard unsaved environment changes?',
+    });
+    if (!shouldClose) return;
+    setIsDirty(false);
+    onClose();
   };
 
   if (!open) return null;
@@ -178,7 +171,7 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
             </div>
             <button
               className="p-2 rounded hover:bg-muted"
-              onClick={onClose}
+              onClick={handleClose}
               aria-label="Close environment panel"
               type="button"
             >
@@ -203,7 +196,7 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
           </div>
           <button
             className="p-2 rounded hover:bg-muted"
-            onClick={onClose}
+            onClick={handleClose}
             aria-label="Close environment panel"
             type="button"
           >
@@ -232,9 +225,10 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
               <select
                 className="bg-white border border-border rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
                 value={activeEnvKey}
-                onChange={(e) =>
-                  setLocalEnv((prev) => ({ ...prev, active_env: e.target.value }))
-                }
+                onChange={(e) => {
+                  markDirty();
+                  setLocalEnv((prev) => ({ ...prev, active_env: e.target.value }));
+                }}
               >
                 {envNames.map((key) => (
                   <option key={key} value={key}>
@@ -273,11 +267,11 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
               </button>
             </div>
             <div className="divide-y divide-border">
-              {Object.entries(activeEnv.variables || {}).map(([key, val], idx) => {
+              {Object.entries(activeEnv.variables || {}).map(([key, val]) => {
                 const isSecret = !!(activeEnv.secrets || {})[key];
                 const locked = isSecret && typeof val === 'string' && val.startsWith('enc:') && isLocked;
                 return (
-                  <div key={`${activeEnvKey}-${idx}`} className="px-3 py-2 flex items-center gap-2">
+                  <div key={`${activeEnvKey}-${key}`} className="px-3 py-2 flex items-center gap-2">
                     <input
                       className="w-36 bg-white border border-input rounded px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
                       value={key}
@@ -325,7 +319,7 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
         <div className="h-14 px-4 border-t border-border flex items-center justify-end gap-3 bg-muted/30">
           <button
             className="px-4 py-2 text-sm rounded border border-border bg-white hover:bg-muted transition-colors font-medium"
-            onClick={onClose}
+            onClick={handleClose}
             type="button"
           >
             Cancel

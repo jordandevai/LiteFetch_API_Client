@@ -226,7 +226,6 @@ export const WorkspacePassphraseModal = () => {
               type="text"
               className="w-full bg-white border border-input rounded px-3 py-2 text-sm font-mono"
               value={path}
-              onChange={(e) => setPath(e.target.value)}
               placeholder="/path/to/workspace"
               disabled={busyUnlock || busySwitch || busyRotate}
               readOnly

@@ -1,13 +1,14 @@
-import React, { useState } from 'react';
-import ReactJson from '@microlink/react-json-view';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useActiveRequestStore } from '../../stores/useActiveRequestStore';
 import { useLastResultsQuery } from '../../hooks/useLastResults';
 import { Clock, AlertCircle, Copy } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useWorkspaceLockStore } from '../../stores/useWorkspaceLockStore';
+import { VirtualJsonViewer } from './VirtualJsonViewer';
+import { estimateJsonComplexity, type JsonValue } from './jsonTree';
 
 export const ResponseViewer = () => {
-  const { result, isRunning, resultsByRequest, activeRequestId, sentByRequest } = useActiveRequestStore();
+  const { result, runningByRequest, resultsByRequest, activeRequestId, sentByRequest } = useActiveRequestStore();
   const { data: lastResults } = useLastResultsQuery();
   const isLocked = useWorkspaceLockStore((s) => s.isLocked);
   const activeResult =
@@ -16,6 +17,77 @@ export const ResponseViewer = () => {
       : result;
   const activeRequestInfo = activeRequestId ? sentByRequest[activeRequestId] : null;
   const [tab, setTab] = useState<'json' | 'raw' | 'headers' | 'request'>('json');
+  const [forceJsonRender, setForceJsonRender] = useState(false);
+
+  const rawBody = useMemo(() => {
+    if (!activeResult) return '';
+    if (typeof activeResult.body === 'string') return activeResult.body;
+    try {
+      return JSON.stringify(activeResult.body ?? {}, null, 2);
+    } catch {
+      return String(activeResult.body ?? '');
+    }
+  }, [activeResult]);
+
+  const rawFull = useMemo(
+    () =>
+      activeResult
+        ? [
+            `HTTP ${activeResult.status_code}`,
+            ...Object.entries(activeResult.headers || {}).map(([k, v]) => `${k}: ${v}`),
+            '',
+            rawBody,
+          ].join('\n')
+        : '',
+    [activeResult, rawBody],
+  );
+
+  useEffect(() => {
+    if (!activeResult) return;
+    setForceJsonRender(false);
+  }, [activeResult?.request_id, activeResult?.timestamp]);
+
+  const jsonAnalysis = useMemo(() => {
+    if (!activeResult || tab !== 'json') return null;
+
+    let parsed: JsonValue | null = null;
+    let parseError: string | null = null;
+    const body = activeResult.body;
+
+    if (body && typeof body === 'object') {
+      parsed = body as JsonValue;
+    } else if (typeof body === 'string') {
+      const trimmed = body.trim();
+      const likelyJson =
+        Boolean(activeResult.body_is_json) ||
+        trimmed.startsWith('{') ||
+        trimmed.startsWith('[');
+      if (!likelyJson) {
+        parseError = 'Response body is not marked as JSON';
+      } else {
+        try {
+          parsed = JSON.parse(body) as JsonValue;
+        } catch (ex) {
+          parseError = ex instanceof Error ? ex.message : 'Unable to parse JSON body';
+        }
+      }
+    } else {
+      parseError = 'Response body is empty';
+    }
+
+    if (!parsed) {
+      return {
+        parsed: null,
+        parseError,
+        complexity: null,
+      };
+    }
+
+    const complexity = estimateJsonComplexity(parsed);
+    return { parsed, parseError: null, complexity };
+  }, [activeResult, tab]);
+
+  const isRunning = activeRequestId ? Boolean(runningByRequest[activeRequestId]) : false;
 
   if (isRunning) {
     return <div className="h-full flex items-center justify-center animate-pulse text-primary">Sending Request...</div>;
@@ -30,17 +102,6 @@ export const ResponseViewer = () => {
   }
 
   const isError = activeResult.status_code >= 400 || activeResult.status_code === 0;
-  const rawBody =
-    typeof activeResult.body === 'string'
-      ? activeResult.body
-      : JSON.stringify(activeResult.body ?? {}, null, 2);
-
-  const rawFull = [
-    `HTTP ${activeResult.status_code}`,
-    ...Object.entries(activeResult.headers || {}).map(([k, v]) => `${k}: ${v}`),
-    '',
-    rawBody,
-  ].join('\n');
 
   const requestSummary = activeRequestInfo
     ? {
@@ -98,49 +159,62 @@ export const ResponseViewer = () => {
         )}
 
         {tab === 'json' && (
-          <ReactJson
-            src={(() => {
-              const body = activeResult.body;
-              if (body && typeof body === 'object') return body;
-              if (typeof body === 'string') {
-                try {
-                  const parsed = JSON.parse(body);
-                  if (parsed && typeof parsed === 'object') return parsed;
-                } catch {
-                  /* ignore parse errors */
-                }
-                return { raw: body };
-              }
-              return { raw: body ?? '' };
-            })()}
-            theme="rjv-default"
-            style={{ backgroundColor: 'transparent' }}
-            name={false}
-            displayDataTypes={false}
-            enableClipboard={(copy) => {
-              // Strip quotes from string values when copying
-              const value = copy.src;
-              let textToCopy: string;
+          <div className="h-full">
+            {!jsonAnalysis?.parsed && (
+              <div className="text-xs text-muted-foreground p-3 border border-border rounded bg-muted/20 space-y-2">
+                <div>Response body is not valid JSON for tree view.</div>
+                {jsonAnalysis?.parseError && <div className="font-mono text-[11px]">{jsonAnalysis.parseError}</div>}
+                <button
+                  className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors"
+                  type="button"
+                  onClick={() => setTab('raw')}
+                >
+                  Open Raw
+                </button>
+              </div>
+            )}
 
-              if (typeof value === 'string') {
-                // For string values, copy without quotes
-                textToCopy = value;
-              } else if (typeof value === 'number' || typeof value === 'boolean') {
-                // For primitives, convert to string
-                textToCopy = String(value);
-              } else {
-                // For objects/arrays, stringify with formatting
-                textToCopy = JSON.stringify(value, null, 2);
-              }
+            {jsonAnalysis?.parsed && jsonAnalysis.complexity?.tooComplex && !forceJsonRender && (
+              <div className="text-xs text-muted-foreground p-3 border border-border rounded bg-muted/20 space-y-2">
+                <div className="font-semibold text-foreground">JSON tree rendering is likely to be slow for this payload.</div>
+                <div>
+                  Nodes inspected: {jsonAnalysis.complexity.nodeCount} | Depth: {jsonAnalysis.complexity.maxDepthSeen}
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors"
+                    type="button"
+                    onClick={() => setTab('raw')}
+                  >
+                    Open Raw
+                  </button>
+                  <button
+                    className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors"
+                    type="button"
+                    onClick={() => setForceJsonRender(true)}
+                  >
+                    Try JSON View Anyway
+                  </button>
+                </div>
+              </div>
+            )}
 
-              navigator.clipboard.writeText(textToCopy);
-            }}
-          />
+            {jsonAnalysis?.parsed && (!jsonAnalysis.complexity?.tooComplex || forceJsonRender) && (
+              <VirtualJsonViewer data={jsonAnalysis.parsed} />
+            )}
+          </div>
         )}
 
         {tab === 'raw' && (
           <div className="space-y-2">
             <div className="flex justify-end gap-2">
+              <button
+                className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors flex items-center gap-1 font-medium"
+                type="button"
+                onClick={() => navigator.clipboard.writeText(rawBody)}
+              >
+                <Copy size={12} /> Copy Body
+              </button>
               <button
                 className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors flex items-center gap-1 font-medium"
                 type="button"

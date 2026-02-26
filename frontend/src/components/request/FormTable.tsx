@@ -1,6 +1,8 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
 import { Trash2, Plus, Lock, Unlock } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { useKeyValueTableNavigation } from '../../lib/forms/useKeyValueTableNavigation';
+import { TableValidationNotice } from './TableValidationNotice';
 
 type Row = { key: string; value?: string; enabled?: boolean; description?: string; type?: 'text' | 'file' | 'binary'; secret?: boolean };
 
@@ -11,10 +13,22 @@ type Props = {
   showDescription?: boolean;
   onEditRow?: (index: number) => void;
   showSecrets?: boolean;
+  tableId?: string;
+  duplicateKeyIndexes?: Set<number>;
+  missingKeyIndexes?: Set<number>;
 };
 
-export const FormTable = ({ rows, onChange, showDescription = false, onEditRow, showSecrets = false }: Props) => {
-  const tableRef = useRef<HTMLDivElement>(null);
+export const FormTable = ({
+  rows,
+  onChange,
+  showDescription = false,
+  onEditRow,
+  showSecrets = false,
+  tableId = 'form-table',
+  duplicateKeyIndexes,
+  missingKeyIndexes,
+}: Props) => {
+  const displayRows = rows && rows.length > 0 ? rows : [{ key: '', value: '', enabled: true, description: '' }];
 
   // Ensure there's always at least one empty row
   useEffect(() => {
@@ -42,6 +56,15 @@ export const FormTable = ({ rows, onChange, showDescription = false, onEditRow, 
   const addRow = () => {
     onChange([...(rows || []), { key: '', value: '', enabled: true, description: '' }]);
   };
+  const { getCellProps } = useKeyValueTableNavigation({
+    tableId,
+    rowCount: displayRows.length,
+    fields: showDescription ? ['key', 'value', 'description'] : ['key', 'value'],
+    addRow,
+    deleteRow,
+    canDeleteRow: (rowIndex) =>
+      Boolean(displayRows[rowIndex]?.key?.trim() || displayRows[rowIndex]?.value?.trim()) || displayRows.length > 1,
+  });
 
   // Auto-expand: add new row when user types in the last row
   const handleChange = (idx: number, patch: Partial<Row>) => {
@@ -64,10 +87,8 @@ export const FormTable = ({ rows, onChange, showDescription = false, onEditRow, 
     onChange(rows.map(r => ({ ...r, enabled: !allEnabled })));
   };
 
-  const displayRows = rows && rows.length > 0 ? rows : [{ key: '', value: '', enabled: true, description: '' }];
-
   return (
-    <div className="border border-border rounded overflow-hidden" ref={tableRef}>
+    <div className="border border-border rounded overflow-hidden">
       {/* Table Header */}
       <div className="bg-muted border-b border-border">
         <div className="flex items-center px-2 py-2 text-xs font-medium text-muted-foreground">
@@ -115,11 +136,15 @@ export const FormTable = ({ rows, onChange, showDescription = false, onEditRow, 
               <div className={cn("px-2", showDescription ? "w-1/4" : "w-1/3")}>
                 <input
                   type="text"
-                  className="w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded"
+                  className={cn(
+                    "w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded",
+                    (duplicateKeyIndexes?.has(idx) || missingKeyIndexes?.has(idx)) && "bg-amber-50 ring-1 ring-amber-300"
+                  )}
                   placeholder="Key"
                   value={row.key || ''}
                   onChange={(e) => handleChange(idx, { key: e.target.value })}
                   disabled={row.enabled === false}
+                  {...getCellProps(idx, 'key')}
                 />
               </div>
 
@@ -133,6 +158,7 @@ export const FormTable = ({ rows, onChange, showDescription = false, onEditRow, 
                   onChange={(e) => handleChange(idx, { value: e.target.value })}
                   disabled={row.enabled === false}
                   onDoubleClick={() => onEditRow?.(idx)}
+                  {...getCellProps(idx, 'value')}
                 />
               </div>
 
@@ -146,6 +172,7 @@ export const FormTable = ({ rows, onChange, showDescription = false, onEditRow, 
                     value={row.description || ''}
                     onChange={(e) => updateRow(idx, { description: e.target.value })}
                     disabled={row.enabled === false}
+                    {...getCellProps(idx, 'description')}
                   />
                 </div>
               )}
@@ -189,6 +216,12 @@ export const FormTable = ({ rows, onChange, showDescription = false, onEditRow, 
 
       {/* Add Row Button */}
       <div className="px-2 py-2 border-t border-border bg-muted/30">
+        <TableValidationNotice
+          duplicateCount={duplicateKeyIndexes?.size}
+          missingKeyCount={missingKeyIndexes?.size}
+          duplicateMessage="Duplicate keys found."
+          missingKeyMessage="Rows with values must include keys."
+        />
         <button
           onClick={addRow}
           className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition-colors px-2 py-1 rounded hover:bg-white"

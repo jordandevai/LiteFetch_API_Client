@@ -20,6 +20,15 @@ import { FormDataTable, type FormDataRow } from './FormDataTable';
 import { HeadersTable, HeaderRow } from './HeadersTable';
 import { cn } from '../../lib/utils';
 import { useWorkspaceLockStore } from '../../stores/useWorkspaceLockStore';
+import { useBiDirectionalSync } from '../../lib/formSync/useBiDirectionalSync';
+import { useUnsavedChangesGuard } from '../../lib/state/useUnsavedChangesGuard';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/Dialog';
+import { KeyValueEditorDialog } from '../ui/KeyValueEditorDialog';
+import {
+  findDuplicateKeyIndexes,
+  findMissingKeyIndexes,
+  validateRequestForSubmit,
+} from '../../lib/forms/requestValidation';
 
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
 
@@ -146,11 +155,13 @@ const normalizeJMESPath = (path: string) => {
 type HeadersTabProps = {
   control: Control<FormValues>;
   onHeadersChange: (headers: HeaderRow[]) => void;
+  duplicateKeyIndexes?: Set<number>;
+  missingKeyIndexes?: Set<number>;
 };
 
 const EMPTY_HEADER: HeaderRow = { key: '', value: '', enabled: true };
 
-const HeadersTab = React.memo(({ control, onHeadersChange }: HeadersTabProps) => {
+const HeadersTab = React.memo(({ control, onHeadersChange, duplicateKeyIndexes, missingKeyIndexes }: HeadersTabProps) => {
   const { fields, replace } = useFieldArray({ control, name: 'headers' });
   const headers = useWatch({ control, name: 'headers' }) as HeaderRow[] | undefined;
 
@@ -175,6 +186,8 @@ const HeadersTab = React.memo(({ control, onHeadersChange }: HeadersTabProps) =>
         headers={headers || [EMPTY_HEADER]}
         onChange={handleReplace}
         showSecrets
+        duplicateKeyIndexes={duplicateKeyIndexes}
+        missingKeyIndexes={missingKeyIndexes}
       />
     </div>
   );
@@ -182,23 +195,30 @@ const HeadersTab = React.memo(({ control, onHeadersChange }: HeadersTabProps) =>
 HeadersTab.displayName = 'HeadersTab';
 
 export const RequestEditor = () => {
-  const { activeRequestId, setIsRunning, setResult, setSentRequest } = useActiveRequestStore();
+  const { activeRequestId, runningByRequest, setRequestRunning, setResult, setSentRequest, setRequestSelectionGuard } = useActiveRequestStore();
   const activeRequest = useActiveRequestFromCollection(activeRequestId);
   const { mutateAsync: saveRequest, isPending: isSaving } = useSaveRequestMutation();
   const { mutateAsync: saveLastResult } = useSaveLastResultMutation();
   const [activeTab, setActiveTab] = useState<'body' | 'headers' | 'params' | 'auth' | 'settings'>('body');
   const [showUrlEditor, setShowUrlEditor] = useState(false);
+  const [urlDraft, setUrlDraft] = useState('');
+  const [urlDraftDirty, setUrlDraftDirty] = useState(false);
+  const [saveState, setSaveState] = useState<'saved' | 'unsaved' | 'saving' | 'error'>('saved');
+  const [validationError, setValidationError] = useState<string | null>(null);
   const { isLocked, openModal } = useWorkspaceLockStore();
-  const syncingFromUrl = useRef(false);
-  const syncingFromParams = useRef(false);
+  const [isEditingUrl, setIsEditingUrl] = useState(false);
+  const urlInputRef = useRef<HTMLInputElement | null>(null);
+  const { confirmDiscard } = useUnsavedChangesGuard();
+  const { markFromLeft, markFromRight, consumeIfFromLeft, consumeIfFromRight, resetSyncOrigin } = useBiDirectionalSync();
   const [paramEditor, setParamEditor] = useState<{
     index: number;
     key: string;
     value: string;
   } | null>(null);
   useHotkeys([
-    { combo: 'mod+s', handler: () => handleSave() },
-    { combo: 'mod+enter', handler: () => handleRun() },
+    { combo: 'mod+s', handler: () => void handleSave() },
+    { combo: 'mod+enter', handler: () => void handleRun() },
+    { combo: 'mod+l', handler: () => urlInputRef.current?.focus() },
   ]);
 
   const {
@@ -208,6 +228,7 @@ export const RequestEditor = () => {
     watch,
     setValue,
     getValues,
+    formState,
   } = useForm<FormValues>({
     defaultValues: {
       name: '',
@@ -231,12 +252,22 @@ export const RequestEditor = () => {
   });
   const urlValue = watch('url');
   const queryParams = watch('query_params');
+  const headersRows = watch('headers');
+  const formBodyRows = watch('form_body');
   const authType = watch('auth_type');
   const authParams = watch('auth_params');
   const secretBody = watch('secret_body');
   const secretAuthParams = watch('secret_auth_params');
+  const autoSaveSnapshot = useWatch({ control });
+  const isDirty = formState.isDirty;
 
   const queryClient = useQueryClient();
+  const headerDuplicateIndexes = useMemo(() => findDuplicateKeyIndexes(headersRows || []), [headersRows]);
+  const headerMissingKeyIndexes = useMemo(() => findMissingKeyIndexes(headersRows || []), [headersRows]);
+  const queryDuplicateIndexes = useMemo(() => findDuplicateKeyIndexes(queryParams || []), [queryParams]);
+  const queryMissingKeyIndexes = useMemo(() => findMissingKeyIndexes(queryParams || []), [queryParams]);
+  const formDuplicateIndexes = useMemo(() => findDuplicateKeyIndexes(formBodyRows || []), [formBodyRows]);
+  const formMissingKeyIndexes = useMemo(() => findMissingKeyIndexes(formBodyRows || []), [formBodyRows]);
   const activeCollectionId = useActiveCollectionStore((s) => s.activeId);
 
   const { fields: ruleFields, append: appendRule, remove: removeRule } = useFieldArray({
@@ -323,6 +354,7 @@ export const RequestEditor = () => {
   // Reset form when active request changes
   useEffect(() => {
     if (!activeRequest) return;
+    resetSyncOrigin();
     const headersRecord = activeRequest.headers || {};
     const derived = deriveAuthFromHeaders(headersRecord, (activeRequest.auth_type as any) || 'none', activeRequest.auth_params || {});
     const secretHeaderMap = activeRequest.secret_headers || {};
@@ -364,31 +396,32 @@ export const RequestEditor = () => {
       secret_body: Boolean(activeRequest.secret_body),
       binary: activeRequest.binary || null,
     });
-  }, [activeRequest, reset, parseQueryParamsFromUrl, deriveAuthFromHeaders]);
+    setSaveState('saved');
+  }, [activeRequest, reset, parseQueryParamsFromUrl, deriveAuthFromHeaders, resetSyncOrigin]);
 
   // Sync URL -> Params
   useEffect(() => {
-    if (syncingFromParams.current) {
-      syncingFromParams.current = false;
+    if (consumeIfFromRight()) {
       return;
     }
+    if (isEditingUrl) return;
     const parsed = parseQueryParamsFromUrl(urlValue || '');
-    syncingFromUrl.current = true;
+    markFromLeft();
     setValue('query_params', parsed, { shouldDirty: false });
-  }, [parseQueryParamsFromUrl, setValue, urlValue]);
+  }, [consumeIfFromRight, isEditingUrl, markFromLeft, parseQueryParamsFromUrl, setValue, urlValue]);
 
   // Sync Params -> URL
   useEffect(() => {
-    if (syncingFromUrl.current) {
-      syncingFromUrl.current = false;
+    if (consumeIfFromLeft()) {
       return;
     }
+    if (isEditingUrl) return;
     const nextUrl = buildUrlWithParams(urlValue || '', queryParams || []);
     if (nextUrl !== urlValue) {
-      syncingFromParams.current = true;
+      markFromRight();
       setValue('url', nextUrl, { shouldDirty: true });
     }
-  }, [buildUrlWithParams, queryParams, setValue, urlValue]);
+  }, [buildUrlWithParams, consumeIfFromLeft, isEditingUrl, markFromRight, queryParams, setValue, urlValue]);
 
   const buildRequest = useMemo(() => {
     return (values: FormValues): HttpRequest => {
@@ -482,10 +515,49 @@ export const RequestEditor = () => {
     return { ...req, headers, body: body ?? null, form_body: formBody, binary: binaryPayload };
   };
 
+  const performSave = useCallback(
+    async (mode: 'manual' | 'auto') => {
+      if (!activeRequest || !activeCollectionId || isLocked) return;
+      if (mode === 'auto' && isSaving) return;
+      const values = getValues();
+      const updated = buildRequest(values);
+      try {
+        setSaveState('saving');
+        await saveRequest(updated);
+        reset(values);
+        setSaveState('saved');
+      } catch (err) {
+        console.error(err);
+        setSaveState('error');
+      }
+    },
+    [activeCollectionId, activeRequest, buildRequest, getValues, isLocked, isSaving, reset, saveRequest],
+  );
+
   const handleSave = async () => {
     if (!activeRequest || !activeCollectionId) return;
-    const updated = buildRequest(getValues());
-    await saveRequest(updated);
+    const issues = validateRequestForSubmit({
+      url: getValues('url'),
+      body_mode: getValues('body_mode'),
+      headers: getValues('headers') || [],
+      query_params: getValues('query_params') || [],
+      form_body: getValues('form_body') || [],
+      binary: getValues('binary'),
+    });
+    if (issues.length) {
+      const first = issues[0];
+      setValidationError(first.message);
+      setActiveTab(first.tab);
+      if (first.selector) {
+        window.setTimeout(() => {
+          const node = document.querySelector<HTMLElement>(first.selector!);
+          node?.focus();
+        }, 0);
+      }
+      return;
+    }
+    setValidationError(null);
+    await performSave('manual');
   };
 
   const handleRun = async () => {
@@ -493,10 +565,31 @@ export const RequestEditor = () => {
       return;
     }
     if (!activeRequest || !activeCollectionId) return;
+    const issues = validateRequestForSubmit({
+      url: getValues('url'),
+      body_mode: getValues('body_mode'),
+      headers: getValues('headers') || [],
+      query_params: getValues('query_params') || [],
+      form_body: getValues('form_body') || [],
+      binary: getValues('binary'),
+    });
+    if (issues.length) {
+      const first = issues[0];
+      setValidationError(first.message);
+      setActiveTab(first.tab);
+      if (first.selector) {
+        window.setTimeout(() => {
+          const node = document.querySelector<HTMLElement>(first.selector!);
+          node?.focus();
+        }, 0);
+      }
+      return;
+    }
+    setValidationError(null);
     const baseReq = buildRequest(getValues());
     const prepared = prepareForSend(baseReq);
     setSentRequest(prepared.id, prepared);
-    setIsRunning(true);
+    setRequestRunning(prepared.id, true);
     try {
       await saveRequest(baseReq);
       const res = await LiteAPI.runRequest(activeCollectionId, prepared);
@@ -515,13 +608,68 @@ export const RequestEditor = () => {
         timestamp: Date.now() / 1000,
       });
     } finally {
-      setIsRunning(false);
+      setRequestRunning(prepared.id, false);
     }
   };
+
+  const openUrlEditor = useCallback(() => {
+    setUrlDraft(getValues('url') || '');
+    setUrlDraftDirty(false);
+    setShowUrlEditor(true);
+    setIsEditingUrl(true);
+  }, [getValues]);
+
+  const closeUrlEditor = useCallback(() => {
+    const shouldClose = confirmDiscard({
+      isDirty: urlDraftDirty,
+      message: 'Discard unsaved URL changes?',
+    });
+    if (!shouldClose) return;
+    setShowUrlEditor(false);
+    setIsEditingUrl(false);
+    setUrlDraftDirty(false);
+  }, [confirmDiscard, urlDraftDirty]);
+
+  const saveAndCloseUrlEditor = useCallback(() => {
+    const nextUrl = urlDraft.trim();
+    const currentUrl = getValues('url') || '';
+    setValue('url', nextUrl, { shouldDirty: nextUrl !== currentUrl });
+    setShowUrlEditor(false);
+    setIsEditingUrl(false);
+    setUrlDraftDirty(false);
+  }, [getValues, setValue, urlDraft]);
+
+  useEffect(() => {
+    setSaveState((prev) => (isDirty ? (prev === 'saving' ? prev : 'unsaved') : 'saved'));
+  }, [isDirty]);
+
+  useEffect(() => {
+    if (validationError) setValidationError(null);
+  }, [autoSaveSnapshot]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeRequest || !activeCollectionId || isLocked || !isDirty) return;
+    const timer = window.setTimeout(() => {
+      void performSave('auto');
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [activeCollectionId, activeRequest, autoSaveSnapshot, isDirty, isLocked, performSave]);
+
+  useEffect(() => {
+    setRequestSelectionGuard(() =>
+      confirmDiscard({
+        isDirty,
+        message: 'You have unsaved request changes. Discard and switch requests?',
+      }),
+    );
+    return () => setRequestSelectionGuard(null);
+  }, [confirmDiscard, isDirty, setRequestSelectionGuard]);
 
   const bodyValue = watch('body');
   const bodyMode = watch('body_mode');
   const binary = watch('binary');
+  const activeRequestRunning = activeRequestId ? Boolean(runningByRequest[activeRequestId]) : false;
+  const urlField = register('url');
 
   if (isLocked) {
     return (
@@ -562,13 +710,39 @@ export const RequestEditor = () => {
 
         <input
           className="flex-1 bg-white border border-input rounded px-4 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-          {...register('url')}
+          {...urlField}
+          ref={(el) => {
+            urlField.ref(el);
+            urlInputRef.current = el;
+          }}
+          data-req-field="url"
           placeholder="http://localhost:8000/api..."
-          onDoubleClick={() => setShowUrlEditor(true)}
+          onDoubleClick={openUrlEditor}
+          onFocus={() => setIsEditingUrl(true)}
+          onBlur={() => setIsEditingUrl(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              void handleRun();
+            }
+          }}
         />
+        <div
+          className={cn(
+            'px-2 py-2 text-xs rounded border font-medium',
+            saveState === 'saved' && 'bg-success/10 text-success border-success/30',
+            saveState === 'unsaved' && 'bg-muted text-muted-foreground border-border',
+            saveState === 'saving' && 'bg-primary/10 text-primary border-primary/30',
+            saveState === 'error' && 'bg-destructive/10 text-destructive border-destructive/30',
+          )}
+          title="Save state"
+        >
+          {saveState === 'saved' ? 'Saved' : saveState === 'unsaved' ? 'Unsaved' : saveState === 'saving' ? 'Saving…' : 'Save failed'}
+        </div>
+
         <button
           className="px-3 py-2 text-xs rounded border border-border bg-white hover:bg-muted transition-colors font-medium"
-          onClick={() => setShowUrlEditor(true)}
+          onClick={openUrlEditor}
           type="button"
         >
           Expand
@@ -587,44 +761,50 @@ export const RequestEditor = () => {
           className="bg-success hover:opacity-90 text-success-foreground px-5 py-2 rounded flex items-center gap-2 text-sm font-semibold transition-opacity"
           onClick={handleRun}
           type="button"
-          disabled={isLocked}
+          disabled={isLocked || activeRequestRunning}
         >
-          <Play size={14} /> Send
+          <Play size={14} /> {activeRequestRunning ? 'Sending…' : 'Send'}
         </button>
       </div>
-      {showUrlEditor && (
-        <div className="fixed inset-0 bg-black/50 z-40 flex items-center justify-center p-6">
-          <div className="bg-card rounded-lg shadow-2xl w-full max-w-4xl p-5 space-y-4">
-            <div className="flex justify-between items-center">
-              <div className="text-sm font-semibold">Edit URL</div>
-              <div className="flex gap-2">
-                <button
-                  className="px-4 py-2 text-sm rounded bg-primary text-primary-foreground hover:opacity-90 transition-opacity font-medium"
-                  onClick={() => {
-                    setValue('url', watch('url').trim(), { shouldDirty: true });
-                    setShowUrlEditor(false);
-                  }}
-                  type="button"
-                >
-                  Save & Close
-                </button>
-                <button
-                  className="px-4 py-2 text-sm rounded border border-border bg-white hover:bg-muted transition-colors font-medium"
-                  onClick={() => setShowUrlEditor(false)}
-                  type="button"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-            <textarea
-              className="w-full h-[28rem] border border-input rounded px-4 py-4 font-mono text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-              value={watch('url')}
-              onChange={(e) => setValue('url', e.target.value, { shouldDirty: true })}
-            />
-          </div>
+      {validationError && (
+        <div className="px-4 py-2 text-xs bg-destructive/10 text-destructive border-b border-destructive/30">
+          {validationError}
         </div>
       )}
+      <Dialog open={showUrlEditor} onOpenChange={(isOpen) => !isOpen && closeUrlEditor()}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Edit URL</DialogTitle>
+          </DialogHeader>
+          <div className="p-4">
+            <textarea
+              className="w-full h-[28rem] border border-input rounded px-4 py-4 font-mono text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+              value={urlDraft}
+              onChange={(e) => {
+                setUrlDraft(e.target.value);
+                setUrlDraftDirty(true);
+              }}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <button
+              className="px-4 py-2 text-sm rounded border border-border bg-white hover:bg-muted transition-colors font-medium"
+              onClick={closeUrlEditor}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="px-4 py-2 text-sm rounded bg-primary text-primary-foreground hover:opacity-90 transition-opacity font-medium"
+              onClick={saveAndCloseUrlEditor}
+              type="button"
+            >
+              Save & Close
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Tab Navigation */}
       <div className="flex border-b border-border">
@@ -701,12 +881,17 @@ export const RequestEditor = () => {
                 onChange={(rows) => setValue('form_body', rows, { shouldDirty: true })}
                 allowFile={false}
                 showSecrets
+                tableId="form-body"
+                duplicateKeyIndexes={formDuplicateIndexes}
+                missingKeyIndexes={formMissingKeyIndexes}
               />
             )}
             {bodyMode === 'form-data' && (
               <FormDataTable
                 rows={watch('form_body')}
                 onChange={(rows) => setValue('form_body', rows, { shouldDirty: true })}
+                duplicateKeyIndexes={formDuplicateIndexes}
+                missingKeyIndexes={formMissingKeyIndexes}
               />
             )}
             {bodyMode === 'binary' && (
@@ -720,6 +905,7 @@ export const RequestEditor = () => {
                     className="flex-1 bg-transparent border border-input rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
                     placeholder="File path or leave blank to pick"
                     value={binary?.file_path || ''}
+                    data-req-field="binary-path"
                     onChange={(e) => setValue('binary', { ...(binary || {}), file_path: e.target.value, file_inline: undefined }, { shouldDirty: true })}
                   />
                   <BinaryPickerButton
@@ -741,6 +927,8 @@ export const RequestEditor = () => {
           <HeadersTab
             control={control}
             onHeadersChange={(headers) => setValue('headers', headers, { shouldDirty: true })}
+            duplicateKeyIndexes={headerDuplicateIndexes}
+            missingKeyIndexes={headerMissingKeyIndexes}
           />
         )}
         {activeTab === 'params' && (
@@ -765,6 +953,9 @@ export const RequestEditor = () => {
                 setParamEditor({ index: idx, key: row.key || '', value: row.value || '' });
               }}
               showSecrets
+              tableId="params"
+              duplicateKeyIndexes={queryDuplicateIndexes}
+              missingKeyIndexes={queryMissingKeyIndexes}
             />
           </div>
         )}
@@ -946,62 +1137,31 @@ export const RequestEditor = () => {
         )}
       </div>
 
-      {/* Param Value Editor */}
-      {paramEditor && (
-        <div className="fixed inset-0 bg-black/40 z-40 flex items-center justify-center">
-          <div className="w-full max-w-3xl bg-card border border-border rounded shadow-xl">
-            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-              <div>
-                <div className="text-sm font-semibold">Edit Query Parameter</div>
-                <div className="text-xs text-muted-foreground">Index #{paramEditor.index + 1}</div>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors"
-                  onClick={() => setParamEditor(null)}
-                  type="button"
-                >
-                  Close
-                </button>
-                <button
-                  className="px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
-                  onClick={() => {
-                    const rows = [...(queryParams || [])];
-                    rows[paramEditor.index] = {
-                      ...(rows[paramEditor.index] || { enabled: true }),
-                      key: paramEditor.key,
-                      value: paramEditor.value,
-                    };
-                    setValue('query_params', rows, { shouldDirty: true });
-                    setParamEditor(null);
-                  }}
-                  type="button"
-                >
-                  Save
-                </button>
-              </div>
-            </div>
-            <div className="p-4 space-y-3">
-              <div className="flex flex-col gap-1">
-                <label className="text-xs uppercase text-muted-foreground">Key</label>
-                <input
-                  className="w-full bg-white border border-input rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                  value={paramEditor.key}
-                  onChange={(e) => setParamEditor({ ...paramEditor, key: e.target.value })}
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs uppercase text-muted-foreground">Value</label>
-                <textarea
-                  className="w-full min-h-[220px] bg-white border border-input rounded px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                  value={paramEditor.value}
-                  onChange={(e) => setParamEditor({ ...paramEditor, value: e.target.value })}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <KeyValueEditorDialog
+        open={Boolean(paramEditor)}
+        title="Edit Query Parameter"
+        subtitle={paramEditor ? `Index #${paramEditor.index + 1}` : undefined}
+        keyValue={paramEditor?.key || ''}
+        valueValue={paramEditor?.value || ''}
+        onKeyChange={(value) =>
+          setParamEditor((prev) => (prev ? { ...prev, key: value } : prev))
+        }
+        onValueChange={(value) =>
+          setParamEditor((prev) => (prev ? { ...prev, value } : prev))
+        }
+        onCancel={() => setParamEditor(null)}
+        onSave={() => {
+          if (!paramEditor) return;
+          const rows = [...(queryParams || [])];
+          rows[paramEditor.index] = {
+            ...(rows[paramEditor.index] || { enabled: true }),
+            key: paramEditor.key,
+            value: paramEditor.value,
+          };
+          setValue('query_params', rows, { shouldDirty: true });
+          setParamEditor(null);
+        }}
+      />
     </div>
   );
 };

@@ -21,7 +21,6 @@ export const HistoryDrawer = ({ open, onClose, onLoad }: HistoryDrawerProps) => 
     enabled: open && !!activeId && !isLocked,
     retry: false,
   });
-  const isRunning = useActiveRequestStore((s) => s.isRunning);
   const [notice, setNotice] = useState<string | null>(null);
 
   if (!open) return null;
@@ -54,17 +53,13 @@ export const HistoryDrawer = ({ open, onClose, onLoad }: HistoryDrawerProps) => 
           {!isLocked && !isLoading && data && data.length === 0 && (
             <div className="p-4 text-xs text-muted-foreground">No history yet.</div>
           )}
-          {!isLocked && data?.map((item) => {
+          {!isLocked && data?.map((item, idx) => {
             const isError = item.status_code >= 400 || item.status_code === 0 || item.error;
             return (
               <button
-                key={item.timestamp}
+                key={`${item.request_id}-${item.timestamp}-${idx}`}
                 className="w-full text-left px-4 py-3 border-b border-border hover:bg-muted transition-colors"
                 onClick={() => {
-                  if (isRunning) {
-                    setNotice('Wait for the current request to finish');
-                    return;
-                  }
                   onLoad(item);
                   onClose();
                   setNotice(null);

@@ -127,6 +127,9 @@ export interface RequestResult {
   duration_ms: number;
   headers: Record<string, string>;
   body: Record<string, unknown> | string | null;
+  body_is_json?: boolean;
+  content_type?: string | null;
+  body_bytes?: number;
   error?: string;
   timestamp: number;
 }
@@ -238,6 +241,10 @@ export const LiteAPI = {
   saveLastResults: async (collectionId: string, data: LastResults) => {
     const client = await getApiClient();
     return client.post(`/collections/${collectionId}/last-results`, data);
+  },
+  upsertLastResult: async (collectionId: string, requestId: string, result: RequestResult) => {
+    const client = await getApiClient();
+    return client.post(`/collections/${collectionId}/last-results/${requestId}`, result);
   },
 
   runRequest: async (collectionId: string, req: HttpRequest) => {

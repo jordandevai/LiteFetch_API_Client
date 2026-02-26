@@ -26,7 +26,7 @@ export const useSaveLastResultMutation = () => {
       const current = qc.getQueryData<LastResults>(LAST_RESULTS_KEY(activeId)) || {};
       const next = { ...current, [result.request_id]: result };
       qc.setQueryData(LAST_RESULTS_KEY(activeId), next);
-      await LiteAPI.saveLastResults(activeId, next);
+      await LiteAPI.upsertLastResult(activeId, result.request_id, result);
     },
   });
 };

@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Trash2, Plus, Upload, AlertTriangle, Lock, Unlock } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { useKeyValueTableNavigation } from '../../lib/forms/useKeyValueTableNavigation';
+import { TableValidationNotice } from './TableValidationNotice';
 
 export type FormDataRow = {
   key: string;
@@ -16,6 +18,8 @@ export type FormDataRow = {
 type Props = {
   rows?: FormDataRow[];
   onChange: (rows: FormDataRow[]) => void;
+  duplicateKeyIndexes?: Set<number>;
+  missingKeyIndexes?: Set<number>;
 };
 
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
@@ -65,7 +69,7 @@ const fileToBase64 = (file: File): Promise<string> => {
   });
 };
 
-export const FormDataTable = ({ rows = [], onChange }: Props) => {
+export const FormDataTable = ({ rows = [], onChange, duplicateKeyIndexes, missingKeyIndexes }: Props) => {
   const displayRows = useMemo(() => ensureRows(rows), [rows]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeFileRow, setActiveFileRow] = useState<number | null>(null);
@@ -90,6 +94,17 @@ export const FormDataTable = ({ rows = [], onChange }: Props) => {
     const next = displayRows.filter((_, i) => i !== idx);
     onChange(ensureRows(next));
   };
+  const { getCellProps } = useKeyValueTableNavigation({
+    tableId: 'form-body',
+    rowCount: displayRows.length,
+    fields: ['key', 'type', 'value'],
+    addRow,
+    deleteRow,
+    canDeleteRow: (rowIndex) => {
+      const row = displayRows[rowIndex];
+      return Boolean(row?.key?.trim() || row?.value?.trim() || row?.file_path || row?.file_inline) || displayRows.length > 1;
+    },
+  });
 
   const handleTypeChange = (idx: number, nextType: FormDataRow['type']) => {
     const patch: Partial<FormDataRow> = { type: nextType };
@@ -144,7 +159,7 @@ export const FormDataTable = ({ rows = [], onChange }: Props) => {
     }
   };
 
-const renderFileCell = (row: FormDataRow, idx: number) => {
+  const renderFileCell = (row: FormDataRow, idx: number) => {
     const hasPath = !!row.file_path;
     const hasInline = !!row.file_inline;
     const missing = !(hasPath || hasInline);
@@ -164,6 +179,7 @@ const renderFileCell = (row: FormDataRow, idx: number) => {
               })
             }
             disabled={row.enabled === false}
+            {...getCellProps(idx, 'value')}
           />
           {(hasInline || row.file_name) && !row.file_path && (
             <div className="text-[11px] text-muted-foreground px-2">
@@ -206,7 +222,6 @@ const renderFileCell = (row: FormDataRow, idx: number) => {
       <div className="divide-y divide-border">
         {displayRows.map((row, idx) => {
           const isText = (row.type || 'text') === 'text';
-          const isFile = (row.type || 'text') !== 'text';
           const isEmpty = !row.key?.trim() && !row.value?.toString().trim() && !row.file_path && !row.file_inline;
           return (
             <div
@@ -229,11 +244,15 @@ const renderFileCell = (row: FormDataRow, idx: number) => {
               <div className="w-1/5 px-2">
                 <input
                   type="text"
-                  className="w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded"
+                  className={cn(
+                    "w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded",
+                    (duplicateKeyIndexes?.has(idx) || missingKeyIndexes?.has(idx)) && "bg-amber-50 ring-1 ring-amber-300"
+                  )}
                   placeholder="Key"
                   value={row.key || ''}
                   onChange={(e) => updateRow(idx, { key: e.target.value })}
                   disabled={row.enabled === false}
+                  {...getCellProps(idx, 'key')}
                 />
               </div>
 
@@ -243,6 +262,7 @@ const renderFileCell = (row: FormDataRow, idx: number) => {
                   value={row.type || 'text'}
                   onChange={(e) => handleTypeChange(idx, e.target.value as FormDataRow['type'])}
                   disabled={row.enabled === false}
+                  {...getCellProps(idx, 'type')}
                 >
                   <option value="text">text</option>
                   <option value="file">file</option>
@@ -259,6 +279,7 @@ const renderFileCell = (row: FormDataRow, idx: number) => {
                     value={row.value || ''}
                     onChange={(e) => updateRow(idx, { value: e.target.value })}
                     disabled={row.enabled === false}
+                    {...getCellProps(idx, 'value')}
                   />
                 ) : (
                   renderFileCell(row, idx)
@@ -303,14 +324,22 @@ const renderFileCell = (row: FormDataRow, idx: number) => {
       </div>
 
       <div className="px-2 py-2 border-t border-border bg-muted/30 flex justify-between items-center">
-        <button
-          onClick={addRow}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition-colors px-2 py-1 rounded hover:bg-white"
-          type="button"
-        >
-          <Plus size={14} />
-          Add Row
-        </button>
+        <div>
+          <TableValidationNotice
+            duplicateCount={duplicateKeyIndexes?.size}
+            missingKeyCount={missingKeyIndexes?.size}
+            duplicateMessage="Duplicate form keys found."
+            missingKeyMessage="Rows with values/files must include keys."
+          />
+          <button
+            onClick={addRow}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition-colors px-2 py-1 rounded hover:bg-white"
+            type="button"
+          >
+            <Plus size={14} />
+            Add Row
+          </button>
+        </div>
         <input
           type="file"
           className="hidden"
