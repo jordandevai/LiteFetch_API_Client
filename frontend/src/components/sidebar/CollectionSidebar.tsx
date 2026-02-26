@@ -33,6 +33,8 @@ import { useLastResultsQuery } from '../../hooks/useLastResults';
 import { useActiveCollectionStore } from '../../stores/useActiveCollectionStore';
 import { useCollectionsIndex, useCreateCollectionMutation, useDeleteCollectionMutation } from '../../hooks/useCollectionsIndex';
 import { LiteAPI } from '../../lib/api';
+import { executeBulkRun } from '../../lib/runtime/bulkRun';
+import { useRunSettingsStore } from '../../stores/useRunSettingsStore';
 
 // Recursive Tree Item Component
 const TreeItem = ({
@@ -300,7 +302,10 @@ export const CollectionSidebar = () => {
   const queryClient = useQueryClient();
   const { data: uiState } = useUiStateQuery();
   const { mutate: saveUiState } = useSaveUiStateMutation();
-  const { setResult, setIsRunning, setActiveRequestId } = useActiveRequestStore();
+  const { setResult, setRequestRunning, setActiveRequestId } = useActiveRequestStore();
+  const defaultConcurrency = useRunSettingsStore((s) => s.defaultConcurrency);
+  const setDefaultConcurrency = useRunSettingsStore((s) => s.setDefaultConcurrency);
+  const getConcurrencyForFolder = useRunSettingsStore((s) => s.getConcurrencyForFolder);
   const { data: lastResults } = useLastResultsQuery();
   // reserved for future visual indicator per-folder running
   const [runningFolderId, setRunningFolderId] = useState<string | null>(null); // eslint-disable-line @typescript-eslint/no-unused-vars
@@ -406,7 +411,7 @@ export const CollectionSidebar = () => {
           placeholder: 'Enter folder name',
       defaultValue: 'Root',
       onConfirm: async (chosen) => {
-        setPromptDialog({ ...promptDialog, open: false });
+        setPromptDialog((prev) => ({ ...prev, open: false }));
         const target = folderOptions.find(
           (f) => f.name.toLowerCase() === chosen.toLowerCase(),
         );
@@ -479,26 +484,35 @@ export const CollectionSidebar = () => {
       return;
     }
     setRunningFolderId(folderId);
-    setIsRunning(true);
-    let success = 0;
-    let fail = 0;
-    for (const req of requests) {
-      try {
-        setActiveRequestId(req.id);
-        const res = await LiteAPI.runRequest(activeId, req);
-        setResult(res, req.id);
-        await saveLastResult({ result: res });
-        if (res.status_code >= 400 || res.error) fail += 1;
-        else success += 1;
-      } catch (e) {
-        console.error(e);
-        fail += 1;
-      }
-    }
+    const concurrency = getConcurrencyForFolder(folderId);
+    const report = await executeBulkRun(
+      requests.map((req) => ({
+        requestId: req.id,
+        execute: async () => {
+          setActiveRequestId(req.id);
+          return LiteAPI.runRequest(activeId, req);
+        },
+      })),
+      concurrency,
+      {
+        onItemStart: (requestId) => setRequestRunning(requestId, true),
+        onItemDone: async (requestId, res) => {
+          setResult(res, requestId);
+          await saveLastResult({ result: res });
+          setRequestRunning(requestId, false);
+        },
+        onItemError: (requestId, error) => {
+          console.error(error);
+          setRequestRunning(requestId, false);
+        },
+      },
+    );
     queryClient.invalidateQueries({ queryKey: ['environment', activeId] }); // refresh env after folder run
-    setIsRunning(false);
     setRunningFolderId(null);
-    showBanner(`Folder run complete: ${success} passed, ${fail} failed`, 'info');
+    showBanner(
+      `Folder run complete (${concurrency}x): ${report.passed} passed, ${report.failed} failed`,
+      report.failed ? 'error' : 'success',
+    );
   };
 
   if (!activeId) {
@@ -516,7 +530,7 @@ export const CollectionSidebar = () => {
                   placeholder: 'Enter collection name',
                   defaultValue: 'New Collection',
                   onConfirm: async (name) => {
-                    setPromptDialog({ ...promptDialog, open: false });
+                    setPromptDialog((prev) => ({ ...prev, open: false }));
                     const meta = await createCollectionMeta({ name });
                     setActiveId(meta.id);
                     showBanner(`Created collection "${meta.name}"`, 'success');
@@ -537,7 +551,7 @@ export const CollectionSidebar = () => {
           placeholder={promptDialog.placeholder}
           defaultValue={promptDialog.defaultValue}
           onConfirm={promptDialog.onConfirm}
-          onCancel={() => setPromptDialog({ ...promptDialog, open: false })}
+          onCancel={() => setPromptDialog((prev) => ({ ...prev, open: false }))}
         />
 
         <ConfirmDialog
@@ -546,7 +560,7 @@ export const CollectionSidebar = () => {
           message={confirmDialog.message}
           variant={confirmDialog.variant}
           onConfirm={confirmDialog.onConfirm}
-          onCancel={() => setConfirmDialog({ ...confirmDialog, open: false })}
+          onCancel={() => setConfirmDialog((prev) => ({ ...prev, open: false }))}
         />
         {banner && (
           <div
@@ -596,7 +610,7 @@ export const CollectionSidebar = () => {
                 placeholder: 'Enter collection name',
                 defaultValue: 'New Collection',
                   onConfirm: async (name) => {
-                    setPromptDialog({ ...promptDialog, open: false });
+                    setPromptDialog((prev) => ({ ...prev, open: false }));
                     const meta = await createCollectionMeta({ name });
                     queryClient.invalidateQueries({ queryKey: ['collection', meta.id] });
                     setActiveId(meta.id);
@@ -621,7 +635,7 @@ export const CollectionSidebar = () => {
                   message: `Delete collection "${name}"? This cannot be undone.`,
                   variant: 'destructive',
                   onConfirm: async () => {
-                    setConfirmDialog({ ...confirmDialog, open: false });
+                    setConfirmDialog((prev) => ({ ...prev, open: false }));
                     await deleteCollectionMeta(activeId);
                     queryClient.removeQueries({ queryKey: ['collection', activeId] });
                     const remaining = (collectionsMeta || []).filter((m) => m.id !== activeId);
@@ -662,6 +676,21 @@ export const CollectionSidebar = () => {
           >
             <FolderPlus size={14} /> Folder
           </button>
+        </div>
+        <div className="flex items-center gap-2 pt-1">
+          <span className="text-[11px] text-muted-foreground uppercase tracking-wide">Pool</span>
+          <select
+            className="text-xs bg-white border border-border rounded px-2 py-1"
+            value={defaultConcurrency}
+            onChange={(e) => setDefaultConcurrency(Number(e.target.value))}
+          >
+            {[1, 2, 4, 8, 16].map((value) => (
+              <option key={value} value={value}>
+                {value}x
+              </option>
+            ))}
+          </select>
+          <span className="text-[11px] text-muted-foreground">folder runs</span>
         </div>
       </div>
       {banner && (
@@ -710,7 +739,7 @@ export const CollectionSidebar = () => {
                     placeholder: 'Enter new name',
                     defaultValue: currentName,
                     onConfirm: (name) => {
-                      setPromptDialog({ ...promptDialog, open: false });
+                      setPromptDialog((prev) => ({ ...prev, open: false }));
                       renameItem({ id, name });
                     },
                   });
@@ -722,7 +751,7 @@ export const CollectionSidebar = () => {
                     message: 'Delete this item? This cannot be undone.',
                     variant: 'destructive',
                     onConfirm: () => {
-                      setConfirmDialog({ ...confirmDialog, open: false });
+                      setConfirmDialog((prev) => ({ ...prev, open: false }));
                       deleteItem(id);
                     },
                   });
@@ -753,7 +782,7 @@ export const CollectionSidebar = () => {
         placeholder={promptDialog.placeholder}
         defaultValue={promptDialog.defaultValue}
         onConfirm={promptDialog.onConfirm}
-        onCancel={() => setPromptDialog({ ...promptDialog, open: false })}
+        onCancel={() => setPromptDialog((prev) => ({ ...prev, open: false }))}
       />
 
       <ConfirmDialog
@@ -762,7 +791,7 @@ export const CollectionSidebar = () => {
         message={confirmDialog.message}
         variant={confirmDialog.variant}
         onConfirm={confirmDialog.onConfirm}
-        onCancel={() => setConfirmDialog({ ...confirmDialog, open: false })}
+        onCancel={() => setConfirmDialog((prev) => ({ ...prev, open: false }))}
       />
     </div>
   );

@@ -1,6 +1,8 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
 import { Trash2, Plus, Lock, Unlock } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { useKeyValueTableNavigation } from '../../lib/forms/useKeyValueTableNavigation';
+import { TableValidationNotice } from './TableValidationNotice';
 
 export type HeaderRow = { key: string; value: string; enabled?: boolean; secret?: boolean };
 
@@ -8,10 +10,17 @@ type Props = {
   headers: HeaderRow[];
   onChange: (headers: HeaderRow[]) => void;
   showSecrets?: boolean;
+  duplicateKeyIndexes?: Set<number>;
+  missingKeyIndexes?: Set<number>;
 };
 
-export const HeadersTable = ({ headers, onChange, showSecrets = false }: Props) => {
-  const tableRef = useRef<HTMLDivElement>(null);
+export const HeadersTable = ({
+  headers,
+  onChange,
+  showSecrets = false,
+  duplicateKeyIndexes,
+  missingKeyIndexes,
+}: Props) => {
   // Ensure there's always at least one empty row
   useEffect(() => {
     if (!headers || headers.length === 0) {
@@ -39,6 +48,18 @@ export const HeadersTable = ({ headers, onChange, showSecrets = false }: Props) 
     onChange([...(headers || []), { key: '', value: '', enabled: true }]);
   };
 
+  const displayHeaders = headers && headers.length > 0 ? headers : [{ key: '', value: '', enabled: true }];
+  const hasMultiple = (headers?.length || 0) > 1;
+  const { getCellProps } = useKeyValueTableNavigation({
+    tableId: 'headers',
+    rowCount: displayHeaders.length,
+    fields: ['key', 'value'],
+    addRow: addHeader,
+    deleteRow: deleteHeader,
+    canDeleteRow: (rowIndex) =>
+      Boolean(displayHeaders[rowIndex]?.key?.trim() || displayHeaders[rowIndex]?.value?.trim()) || hasMultiple,
+  });
+
   // Auto-expand: add new row when user types in the last row
   const handleChange = (idx: number, patch: Partial<HeaderRow>) => {
     updateHeader(idx, patch);
@@ -59,11 +80,8 @@ export const HeadersTable = ({ headers, onChange, showSecrets = false }: Props) 
     onChange(headers.map(h => ({ ...h, enabled: !allEnabled })));
   };
 
-  const displayHeaders = headers && headers.length > 0 ? headers : [{ key: '', value: '', enabled: true }];
-  const hasMultiple = (headers?.length || 0) > 1;
-
   return (
-    <div className="border border-border rounded overflow-hidden" ref={tableRef}>
+    <div className="border border-border rounded overflow-hidden">
       {/* Table Header */}
       <div className="bg-muted border-b border-border">
         <div className="flex items-center px-2 py-2 text-xs font-medium text-muted-foreground">
@@ -111,11 +129,15 @@ export const HeadersTable = ({ headers, onChange, showSecrets = false }: Props) 
               <div className="w-1/3 px-2">
                 <input
                   type="text"
-                  className="w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded font-mono"
+                  className={cn(
+                    "w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded font-mono",
+                    (duplicateKeyIndexes?.has(idx) || missingKeyIndexes?.has(idx)) && "bg-amber-50 ring-1 ring-amber-300"
+                  )}
                   placeholder="Content-Type"
                   value={header.key || ''}
                   onChange={(e) => handleChange(idx, { key: e.target.value })}
                   disabled={header.enabled === false}
+                  {...getCellProps(idx, 'key')}
                 />
               </div>
 
@@ -128,6 +150,7 @@ export const HeadersTable = ({ headers, onChange, showSecrets = false }: Props) 
                   value={header.value || ''}
                   onChange={(e) => handleChange(idx, { value: e.target.value })}
                   disabled={header.enabled === false}
+                  {...getCellProps(idx, 'value')}
                 />
               </div>
 
@@ -170,6 +193,12 @@ export const HeadersTable = ({ headers, onChange, showSecrets = false }: Props) 
 
       {/* Add Row Button */}
       <div className="px-2 py-2 border-t border-border bg-muted/30">
+        <TableValidationNotice
+          duplicateCount={duplicateKeyIndexes?.size}
+          missingKeyCount={missingKeyIndexes?.size}
+          duplicateMessage="Duplicate header keys found."
+          missingKeyMessage="Rows with values must include keys."
+        />
         <button
           onClick={addHeader}
           className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition-colors px-2 py-1 rounded hover:bg-white"

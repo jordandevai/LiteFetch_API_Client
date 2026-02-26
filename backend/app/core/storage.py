@@ -4,7 +4,6 @@ import os
 import secrets
 import shutil
 import time
-import json as jsonlib
 from pathlib import Path
 from typing import Any, List, Dict, Optional, Tuple
 from uuid import uuid4
@@ -27,6 +26,14 @@ from app.core.crypto import (
     is_encrypted_string,
     KDF_NAME,
     KEY_LEN,
+)
+from app.core.secret_transformers import (
+    transform_request_for_encryption,
+    transform_request_for_decryption,
+    request_contains_encrypted_values,
+    transform_environment_for_encryption,
+    transform_environment_for_decryption,
+    environment_contains_encrypted_values,
 )
 
 
@@ -71,29 +78,6 @@ class StorageEngine:
     def refresh_workspace_gitignore(self) -> bool:
         self._ensure_workspace_gitignore()
         return True
-
-    def _ensure_workspace_gitignore(self):
-        """
-        Ensure dynamic runtime artifacts are ignored when users version their workspace.
-        """
-        patterns = [
-            "collections/*/history.json",
-            "collections/*/last_results.json",
-            "collections/*/cookies.json",
-        ]
-        gitignore_path = self.base_dir / ".gitignore"
-        try:
-            existing = gitignore_path.read_text().splitlines() if gitignore_path.exists() else []
-            updated = existing[:]
-            for p in patterns:
-                if p not in existing:
-                    updated.append(p)
-            if updated != existing:
-                gitignore_path.parent.mkdir(parents=True, exist_ok=True)
-                gitignore_path.write_text("\n".join(updated) + ("\n" if updated else ""))
-        except Exception:
-            # Gitignore best-effort; ignore failures to avoid blocking runtime
-            pass
 
     # --- Vault helpers ---
     def _vault_path(self) -> Path:
@@ -171,15 +155,19 @@ class StorageEngine:
     def _cookies_path(self, collection_id: str) -> Path:
         return self._collection_dir(collection_id) / "cookies.json"
 
-    def _atomic_write(self, target_path: Path, data: Any):
+    def _is_runtime_artifact(self, target_path: Path) -> bool:
+        return target_path.name in {"history.json", "last_results.json", "cookies.json"}
+
+    def _atomic_write(self, target_path: Path, data: Any, compact: bool = False):
         target_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = target_path.with_suffix(".tmp")
+        dump_kwargs = {"separators": (",", ":")} if compact else {"indent": 2}
         if hasattr(data, "model_dump"):
-            payload = json.dumps(data.model_dump(), indent=2)
+            payload = json.dumps(data.model_dump(), **dump_kwargs)
         elif hasattr(data, "dict"):
-            payload = json.dumps(data.dict(), indent=2)
+            payload = json.dumps(data.dict(), **dump_kwargs)
         else:
-            payload = json.dumps(data, indent=2)
+            payload = json.dumps(data, **dump_kwargs)
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(payload)
             f.flush()
@@ -196,12 +184,12 @@ class StorageEngine:
             obj = data
         return json.dumps(obj, separators=(",", ":"))
 
-    def _secure_write_json(self, target_path: Path, data: Any):
+    def _secure_write_json(self, target_path: Path, data: Any, compact: bool = False):
         if not self.master_key:
             raise VaultLockedError("workspace locked")
         ciphertext = encrypt_value(self._prepare_payload(data), self.master_key)
         wrapper = {"v": 1, "ciphertext": ciphertext}
-        self._atomic_write(target_path, wrapper)
+        self._atomic_write(target_path, wrapper, compact=compact)
 
     def _secure_read_json(self, target_path: Path) -> Any:
         if not self.master_key:
@@ -246,152 +234,23 @@ class StorageEngine:
             return json.load(f)
 
     def _write_sensitive(self, path: Path, data: Any):
+        compact = self._is_runtime_artifact(path)
         if self.master_key:
-            self._secure_write_json(path, data)
+            self._secure_write_json(path, data, compact=compact)
             return
         if self._vault_ready():
             raise VaultLockedError("workspace locked")
-        self._atomic_write(path, data)
+        self._atomic_write(path, data, compact=compact)
 
     def _require_unlocked(self):
         if self._vault_ready() and not self.master_key:
             raise VaultLockedError("workspace locked")
 
     def _encrypt_request_secrets(self, req: Any) -> Any:
-        if not self.master_key:
-            return req
-        r = req.model_copy(deep=True)
-        # Headers
-        secret_headers = getattr(r, "secret_headers", {}) or {}
-        next_headers = {}
-        for k, v in (r.headers or {}).items():
-            if secret_headers.get(k) and isinstance(v, str) and not is_encrypted_string(v):
-                next_headers[k] = encrypt_value(v, self.master_key)
-            else:
-                next_headers[k] = v
-        r.headers = next_headers
-
-        # Query params
-        secret_q = getattr(r, "secret_query_params", {}) or {}
-        next_q = []
-        for row in r.query_params or []:
-            row_copy = dict(row)
-            key = row_copy.get("key") or ""
-            val = row_copy.get("value")
-            if secret_q.get(key) and isinstance(val, str) and not is_encrypted_string(str(val)):
-                row_copy["value"] = encrypt_value(str(val), self.master_key)
-            next_q.append(row_copy)
-        r.query_params = next_q
-
-        # Form body
-        secret_form = getattr(r, "secret_form_fields", {}) or {}
-        next_form = []
-        for row in r.form_body or []:
-            row_copy = dict(row)
-            key = row_copy.get("key") or ""
-            val = row_copy.get("value")
-            row_type = (row_copy.get("type") or "text").lower()
-            # Only encrypt textual form values; do not encrypt file paths or blobs
-            if row_type == "text" and secret_form.get(key) and isinstance(val, str) and not is_encrypted_string(str(val)):
-                row_copy["value"] = encrypt_value(str(val), self.master_key)
-            next_form.append(row_copy)
-        r.form_body = next_form
-
-        # Auth
-        secret_auth = getattr(r, "secret_auth_params", {}) or {}
-        next_auth = {}
-        for k, v in (r.auth_params or {}).items():
-            if secret_auth.get(k) and isinstance(v, str) and not is_encrypted_string(v):
-                next_auth[k] = encrypt_value(v, self.master_key)
-            else:
-                next_auth[k] = v
-        r.auth_params = next_auth
-
-        # Body
-        if getattr(r, "secret_body", False):
-            body_val = r.body
-            if isinstance(body_val, str) and not is_encrypted_string(body_val):
-                r.body = encrypt_value(body_val, self.master_key)
-            elif isinstance(body_val, dict):
-                try:
-                    raw = jsonlib.dumps(body_val)
-                    r.body = encrypt_value(raw, self.master_key)
-                except Exception:
-                    pass
-        return r
+        return transform_request_for_encryption(req, self.master_key)
 
     def _decrypt_request_secrets(self, req: Any) -> Any:
-        if not self.master_key:
-            return req
-        r = req
-        # Headers
-        secret_headers = getattr(r, "secret_headers", {}) or {}
-        next_headers = {}
-        for k, v in (r.headers or {}).items():
-            if secret_headers.get(k) and isinstance(v, str) and is_encrypted_string(v):
-                try:
-                    next_headers[k] = decrypt_value(v, self.master_key)
-                except CryptoError:
-                    next_headers[k] = v
-            else:
-                next_headers[k] = v
-        r.headers = next_headers
-
-        # Query params
-        secret_q = getattr(r, "secret_query_params", {}) or {}
-        next_q = []
-        for row in r.query_params or []:
-            row_copy = dict(row)
-            key = row_copy.get("key") or ""
-            val = row_copy.get("value")
-            if secret_q.get(key) and isinstance(val, str) and is_encrypted_string(val):
-                try:
-                    row_copy["value"] = decrypt_value(val, self.master_key)
-                except CryptoError:
-                    pass
-            next_q.append(row_copy)
-        r.query_params = next_q
-
-        # Form body
-        secret_form = getattr(r, "secret_form_fields", {}) or {}
-        next_form = []
-        for row in r.form_body or []:
-            row_copy = dict(row)
-            key = row_copy.get("key") or ""
-            val = row_copy.get("value")
-            row_type = (row_copy.get("type") or "text").lower()
-            if row_type == "text" and secret_form.get(key) and isinstance(val, str) and is_encrypted_string(val):
-                try:
-                    row_copy["value"] = decrypt_value(val, self.master_key)
-                except CryptoError:
-                    pass
-            next_form.append(row_copy)
-        r.form_body = next_form
-
-        # Auth
-        secret_auth = getattr(r, "secret_auth_params", {}) or {}
-        next_auth = {}
-        for k, v in (r.auth_params or {}).items():
-            if secret_auth.get(k) and isinstance(v, str) and is_encrypted_string(v):
-                try:
-                    next_auth[k] = decrypt_value(v, self.master_key)
-                except CryptoError:
-                    next_auth[k] = v
-            else:
-                next_auth[k] = v
-        r.auth_params = next_auth
-
-        # Body
-        if getattr(r, "secret_body", False) and isinstance(r.body, str) and is_encrypted_string(r.body):
-            try:
-                raw = decrypt_value(r.body, self.master_key)
-                try:
-                    r.body = jsonlib.loads(raw)
-                except Exception:
-                    r.body = raw
-            except CryptoError:
-                pass
-        return r
+        return transform_request_for_decryption(req, self.master_key)
 
     def _walk_requests(self, items: list, fn) -> list:
         result = []
@@ -428,49 +287,13 @@ class StorageEngine:
         return False
 
     def _request_contains_encrypted_secret(self, req: Any) -> bool:
-        secret_headers = getattr(req, "secret_headers", {}) or {}
-        for k, v in (getattr(req, "headers", {}) or {}).items():
-            if secret_headers.get(k) and isinstance(v, str) and is_encrypted_string(v):
-                return True
-
-        secret_q = getattr(req, "secret_query_params", {}) or {}
-        for row in getattr(req, "query_params", []) or []:
-            key = (row or {}).get("key") or ""
-            val = (row or {}).get("value")
-            if secret_q.get(key) and isinstance(val, str) and is_encrypted_string(val):
-                return True
-
-        secret_form = getattr(req, "secret_form_fields", {}) or {}
-        for row in getattr(req, "form_body", []) or []:
-            key = (row or {}).get("key") or ""
-            val = (row or {}).get("value")
-            row_type = ((row or {}).get("type") or "text").lower()
-            if row_type == "text" and secret_form.get(key) and isinstance(val, str) and is_encrypted_string(val):
-                return True
-
-        secret_auth = getattr(req, "secret_auth_params", {}) or {}
-        for k, v in (getattr(req, "auth_params", {}) or {}).items():
-            if secret_auth.get(k) and isinstance(v, str) and is_encrypted_string(v):
-                return True
-
-        if getattr(req, "secret_body", False) and isinstance(getattr(req, "body", None), str):
-            if is_encrypted_string(getattr(req, "body")):
-                return True
-        return False
+        return request_contains_encrypted_values(req)
 
     def _collection_contains_encrypted_secrets(self, col: Collection) -> bool:
         return self._walk_requests_any(col.items or [], self._request_contains_encrypted_secret)
 
     def _environment_contains_encrypted_secrets(self, env_file: EnvironmentFile) -> bool:
-        for env_obj in env_file.envs.values():
-            secrets_map = getattr(env_obj, "secrets", {}) or {}
-            for key, is_secret in secrets_map.items():
-                if not is_secret:
-                    continue
-                val = env_obj.variables.get(key)
-                if isinstance(val, str) and is_encrypted_string(val):
-                    return True
-        return False
+        return environment_contains_encrypted_values(env_file)
 
     def reencrypt_sensitive(self) -> Dict[str, int]:
         """
@@ -634,17 +457,7 @@ class StorageEngine:
                 raise VaultLockedError("workspace locked")
             return env_file
 
-        for env_obj in env_file.envs.values():
-            secrets_map = getattr(env_obj, "secrets", {}) or {}
-            for key, is_secret in secrets_map.items():
-                if not is_secret:
-                    continue
-                val = env_obj.variables.get(key)
-                if isinstance(val, str) and is_encrypted_string(val):
-                    try:
-                        env_obj.variables[key] = decrypt_value(val, self.master_key)
-                    except CryptoError:
-                        continue
+        env_file = transform_environment_for_decryption(env_file, self.master_key)
         if was_wrapped:
             try:
                 self.save_environment(collection_id, env_file)
@@ -655,19 +468,7 @@ class StorageEngine:
     def save_environment(self, collection_id: str, env: EnvironmentFile):
         if self._vault_ready() and not self.master_key:
             raise VaultLockedError("workspace locked")
-        env_copy = env.model_copy(deep=True)
-        if self.master_key:
-            for env_obj in env_copy.envs.values():
-                secrets_map = getattr(env_obj, "secrets", {}) or {}
-                for key, is_secret in secrets_map.items():
-                    if not is_secret:
-                        continue
-                    val = env_obj.variables.get(key)
-                    if isinstance(val, str) and is_encrypted_string(val):
-                        # already encrypted, leave as-is
-                        continue
-                    if isinstance(val, str):
-                        env_obj.variables[key] = encrypt_value(val, self.master_key)
+        env_copy = transform_environment_for_encryption(env, self.master_key)
         self._atomic_write(self._env_path(collection_id), env_copy)
         self._touch_meta(collection_id)
 
@@ -689,7 +490,15 @@ class StorageEngine:
         if not isinstance(results, dict):
             results = {}
         self._write_sensitive(self._last_results_path(collection_id), results)
-        self._touch_meta(collection_id)
+
+    def upsert_last_result(self, collection_id: str, request_id: str, result: dict):
+        if not request_id:
+            return
+        results = self.load_last_results(collection_id)
+        if not isinstance(results, dict):
+            results = {}
+        results[request_id] = result if isinstance(result, dict) else {}
+        self._write_sensitive(self._last_results_path(collection_id), results)
 
     def load_history(self, collection_id: str) -> List[dict]:
         return self._read_sensitive(self._history_path(collection_id), default=[])
@@ -699,7 +508,6 @@ class StorageEngine:
         history.insert(0, result)
         history = history[:50]
         self._write_sensitive(self._history_path(collection_id), history)
-        self._touch_meta(collection_id)
 
     # --- Cookies ---
     def _load_cookies_blob(self, collection_id: str) -> Dict[str, list]:
@@ -728,21 +536,18 @@ class StorageEngine:
         if cleaned != entries:
             data[env_id] = cleaned
             self._write_sensitive(self._cookies_path(collection_id), data)
-            self._touch_meta(collection_id)
         return cleaned
 
     def save_env_cookies(self, collection_id: str, env_id: str, cookies: list):
         data = self._load_cookies_blob(collection_id)
         data[env_id] = cookies if isinstance(cookies, list) else []
         self._write_sensitive(self._cookies_path(collection_id), data)
-        self._touch_meta(collection_id)
 
     def clear_env_cookies(self, collection_id: str, env_id: str):
         data = self._load_cookies_blob(collection_id)
         if env_id in data:
             data[env_id] = []
             self._write_sensitive(self._cookies_path(collection_id), data)
-            self._touch_meta(collection_id)
 
     def load_bundle(self, collection_id: str) -> CollectionBundle:
         meta = self.load_meta(collection_id)

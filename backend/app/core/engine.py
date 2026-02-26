@@ -4,6 +4,7 @@ import jmespath
 import time
 import uuid
 import random
+import json
 from typing import Any, Dict, Tuple
 from app.models import HttpRequest, RequestResult, EnvironmentFile
 from app.core.storage import storage
@@ -356,24 +357,36 @@ class RequestRunner:
 
         duration = (time.perf_counter() - start_time) * 1000
 
-        # 4. Parse Body
+        # 4. Parse Body (lazy)
         body_content = ""
-        is_json = False
         parsed_json = None
-        
+        content_type = resp_obj.headers.get("content-type")
+        content_type_l = (content_type or "").lower()
+        body_is_json = "application/json" in content_type_l or content_type_l.endswith("+json") or "+json;" in content_type_l
+        body_bytes = len(resp_obj.content or b"")
+
         try:
             body_content = resp_obj.text
-            # Basic JSON detection
-            if "application/json" in resp_obj.headers.get("content-type", ""):
-                parsed_json = resp_obj.json()
-                is_json = True
-        except:
-            pass # Keep as text
+        except Exception:
+            try:
+                body_content = (resp_obj.content or b"").decode("utf-8", errors="replace")
+            except Exception:
+                body_content = ""
 
         # 5. Extraction Logic (Auto-Magic)
         vars_updated = False
         rule_errors = []
-        if is_json and req.extract_rules:
+        if req.extract_rules:
+            if body_is_json:
+                try:
+                    parsed_json = json.loads(body_content) if body_content else None
+                except Exception as ex:
+                    parsed_json = None
+                    rule_errors.append({"rule_id": "*", "error": f"Invalid JSON response body: {ex}"})
+            else:
+                rule_errors.append({"rule_id": "*", "error": "Response body is not JSON"})
+
+        if parsed_json is not None and req.extract_rules:
             for rule in req.extract_rules:
                 source_path = self._normalize_path(rule.source_path.strip())
                 try:
@@ -395,7 +408,10 @@ class RequestRunner:
             status_code=resp_obj.status_code,
             duration_ms=duration,
             headers=dict(resp_obj.headers),
-            body=parsed_json if is_json else body_content,
+            body=body_content,
+            body_is_json=body_is_json,
+            content_type=content_type,
+            body_bytes=body_bytes,
         )
         if rule_errors:
             result.error = f"Extraction issues: {rule_errors}"

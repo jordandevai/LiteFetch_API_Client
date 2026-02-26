@@ -79,6 +79,9 @@ class RequestResult(BaseModel):
     duration_ms: float
     headers: Dict[str, str]
     body: Any
+    body_is_json: bool = False
+    content_type: Optional[str] = None
+    body_bytes: int = 0
     error: Optional[str] = None
     timestamp: float = Field(default_factory=time.time)
 

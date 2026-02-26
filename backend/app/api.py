@@ -147,6 +147,15 @@ async def save_last_results(collection_id: str, payload: Dict[str, Any] = Body(.
     return {"status": "ok"}
 
 
+@router.post("/collections/{collection_id}/last-results/{request_id}")
+async def upsert_last_result(collection_id: str, request_id: str, result: RequestResult):
+    try:
+        storage.upsert_last_result(collection_id, request_id, result.model_dump())
+    except VaultLockedError:
+        raise HTTPException(status_code=423, detail="workspace locked")
+    return {"status": "ok"}
+
+
 # --- Workspace ---
 @router.get("/workspace")
 async def get_workspace():
