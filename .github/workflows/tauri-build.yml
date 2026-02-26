@@ -83,6 +83,15 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Set desktop package version
+        shell: bash
+        run: |
+          BASE="$(node -e "const fs=require('fs'); const v=JSON.parse(fs.readFileSync('desktop/tauri.conf.json','utf8')).version; console.log(v);")"
+          MAJOR_MINOR="$(echo "$BASE" | cut -d. -f1,2)"
+          CI_VERSION="${MAJOR_MINOR}.${GITHUB_RUN_NUMBER}"
+          ./scripts/set-desktop-version.sh "$CI_VERSION"
+          echo "CI package version: $CI_VERSION"
+
       - name: Tauri build
         working-directory: frontend
         run: npm run tauri:build
