@@ -2,7 +2,7 @@
 > **The Local-First, Lightweight API Workbench.**
 > Built by **Jordan Gonzales (JTech Minds)**.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![License](https://img.shields.io/badge/license-Personal%20Free%20%7C%20Commercial%20Paid-blue.svg)
 ![Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-orange)
 ![FastAPI](https://img.shields.io/badge/backend-FastAPI-green)
 ![React](https://img.shields.io/badge/frontend-React%20%2B%20Vite-cyan)
@@ -116,4 +116,19 @@ Issues and Pull Requests are welcome!
 3.  Submit a PR.
 
 ---
-Built with Care by Jordan Gonzales - © 2025 JTechMinds LLC. MIT License.
+## Licensing
+
+LiteFetch uses a dual-license model:
+
+- Personal / non-commercial use: free under [LICENSE-PERSONAL.md](LICENSE-PERSONAL.md)
+- Commercial use: requires a paid commercial license, see [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)
+
+Commercial licensing is available at:
+- https://litefetch.com
+
+Important:
+- License terms can change for future versions.
+- Any versions previously released under MIT remain under MIT for those versions.
+
+---
+Built with Care by Jordan Gonzales - © 2025 JTechMinds LLC.
