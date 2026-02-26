@@ -3,8 +3,9 @@ import { Trash2, Plus, Lock, Unlock } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useKeyValueTableNavigation } from '../../lib/forms/useKeyValueTableNavigation';
 import { TableValidationNotice } from './TableValidationNotice';
+import { applyRowPatchWithTrailingEmpty } from '../../lib/forms/trailingEmptyRow';
 
-type Row = { key: string; value?: string; enabled?: boolean; description?: string; type?: 'text' | 'file' | 'binary'; secret?: boolean };
+export type Row = { key: string; value?: string; enabled?: boolean; description?: string; type?: 'text' | 'file' | 'binary'; secret?: boolean };
 
 type Props = {
   rows: Row[];
@@ -16,6 +17,9 @@ type Props = {
   tableId?: string;
   duplicateKeyIndexes?: Set<number>;
   missingKeyIndexes?: Set<number>;
+  unresolvedKeyIndexes?: Set<number>;
+  unresolvedValueIndexes?: Set<number>;
+  variableSuggestions?: string[];
 };
 
 export const FormTable = ({
@@ -27,8 +31,12 @@ export const FormTable = ({
   tableId = 'form-table',
   duplicateKeyIndexes,
   missingKeyIndexes,
+  unresolvedKeyIndexes,
+  unresolvedValueIndexes,
+  variableSuggestions,
 }: Props) => {
   const displayRows = rows && rows.length > 0 ? rows : [{ key: '', value: '', enabled: true, description: '' }];
+  const variableListId = `${tableId}-variable-suggestions`;
 
   // Ensure there's always at least one empty row
   useEffect(() => {
@@ -66,20 +74,15 @@ export const FormTable = ({
       Boolean(displayRows[rowIndex]?.key?.trim() || displayRows[rowIndex]?.value?.trim()) || displayRows.length > 1,
   });
 
-  // Auto-expand: add new row when user types in the last row
+  // Auto-expand once when the last row changes from empty -> non-empty.
   const handleChange = (idx: number, patch: Partial<Row>) => {
-    updateRow(idx, patch);
-
-    // If this is the last row and user is typing, add a new row
-    const isLastRow = idx === rows.length - 1;
-    const hasContent = (patch.key && patch.key.trim()) || (patch.value && patch.value.trim());
-
-    if (isLastRow && hasContent) {
-      // Small delay to ensure smooth UX
-      setTimeout(() => {
-        addRow();
-      }, 50);
-    }
+    const next = applyRowPatchWithTrailingEmpty(rows || [], idx, patch, () => ({
+      key: '',
+      value: '',
+      enabled: true,
+      description: '',
+    }));
+    onChange(next);
   };
 
   const toggleAll = () => {
@@ -138,12 +141,13 @@ export const FormTable = ({
                   type="text"
                   className={cn(
                     "w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded",
-                    (duplicateKeyIndexes?.has(idx) || missingKeyIndexes?.has(idx)) && "bg-amber-50 ring-1 ring-amber-300"
+                    (duplicateKeyIndexes?.has(idx) || missingKeyIndexes?.has(idx) || unresolvedKeyIndexes?.has(idx)) && "bg-amber-50 ring-1 ring-amber-300"
                   )}
                   placeholder="Key"
                   value={row.key || ''}
                   onChange={(e) => handleChange(idx, { key: e.target.value })}
                   disabled={row.enabled === false}
+                  list={variableSuggestions?.length ? variableListId : undefined}
                   {...getCellProps(idx, 'key')}
                 />
               </div>
@@ -152,12 +156,16 @@ export const FormTable = ({
               <div className={cn("px-2", showDescription ? "w-1/4" : "flex-1")}>
                 <input
                   type="text"
-                  className="w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded"
+                  className={cn(
+                    "w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded",
+                    unresolvedValueIndexes?.has(idx) && "bg-amber-50 ring-1 ring-amber-300",
+                  )}
                   placeholder="Value"
                   value={row.value || ''}
                   onChange={(e) => handleChange(idx, { value: e.target.value })}
                   disabled={row.enabled === false}
                   onDoubleClick={() => onEditRow?.(idx)}
+                  list={variableSuggestions?.length ? variableListId : undefined}
                   {...getCellProps(idx, 'value')}
                 />
               </div>
@@ -216,6 +224,13 @@ export const FormTable = ({
 
       {/* Add Row Button */}
       <div className="px-2 py-2 border-t border-border bg-muted/30">
+        {variableSuggestions?.length ? (
+          <datalist id={variableListId}>
+            {variableSuggestions.map((option) => (
+              <option key={option} value={option} />
+            ))}
+          </datalist>
+        ) : null}
         <TableValidationNotice
           duplicateCount={duplicateKeyIndexes?.size}
           missingKeyCount={missingKeyIndexes?.size}

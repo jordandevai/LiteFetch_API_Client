@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { X, Plus, Trash2, Lock, Unlock } from 'lucide-react';
 import { useEnvironmentQuery, useSaveEnvironmentMutation } from '../../hooks/useEnvironmentData';
 import type { EnvironmentFile } from '../../lib/api';
@@ -22,24 +22,20 @@ const emptyEnvFile: EnvironmentFile = {
 export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
   const { data } = useEnvironmentQuery();
   const { mutateAsync: saveEnv, isPending } = useSaveEnvironmentMutation();
-  const [localEnv, setLocalEnv] = useState<EnvironmentFile>(emptyEnvFile);
-  const [isDirty, setIsDirty] = useState(false);
+  const [draftEnv, setDraftEnv] = useState<EnvironmentFile | null>(null);
   const [status, setStatus] = useState<{ tone: 'info' | 'success' | 'error'; message: string } | null>(null);
   const { isLocked } = useWorkspaceLockStore();
   const { confirmDiscard } = useUnsavedChangesGuard();
-  const markDirty = () => setIsDirty(true);
-
-  // keep local copy for editing
-  useEffect(() => {
-    if (!open || !data || isDirty) return;
-    setLocalEnv(data);
-  }, [data, isDirty, open]);
+  const localEnv = draftEnv || data || emptyEnvFile;
+  const isDirty = draftEnv !== null;
+  const updateEnv = (updater: (current: EnvironmentFile) => EnvironmentFile) => {
+    setDraftEnv((prev) => updater(prev || data || emptyEnvFile));
+  };
 
   const envNames = useMemo(() => Object.keys(localEnv.envs || {}), [localEnv]);
   const activeEnvKey = localEnv.active_env;
   const activeEnv = localEnv.envs[activeEnvKey] || { name: activeEnvKey, variables: {}, secrets: {} };
   const addEnv = () => {
-    markDirty();
     const base = 'env';
     let idx = 1;
     while (localEnv.envs[`${base}-${idx}`]) idx += 1;
@@ -52,11 +48,10 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
         [key]: { name: key, variables: {}, secrets: {} },
       },
     };
-    setLocalEnv(next);
+    updateEnv(() => next);
   };
 
   const addVar = () => {
-    markDirty();
     const key = uniqueKey(Object.keys(activeEnv.variables || {}), 'KEY');
     const next = {
       ...localEnv,
@@ -69,11 +64,10 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
         },
       },
     };
-    setLocalEnv(next);
+    updateEnv(() => next);
   };
 
   const updateVar = (k: string, v: string) => {
-    markDirty();
     const nextVars = { ...activeEnv.variables, [k]: v };
     const next = {
       ...localEnv,
@@ -85,11 +79,10 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
         },
       },
     };
-    setLocalEnv(next);
+    updateEnv(() => next);
   };
 
   const renameVar = (oldKey: string, newKey: string) => {
-    markDirty();
     if (!newKey || oldKey === newKey) return;
     if (Object.prototype.hasOwnProperty.call(activeEnv.variables || {}, newKey)) return;
     const nextVars = renameKeyInMap(activeEnv.variables || {}, oldKey, newKey);
@@ -101,11 +94,10 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
         [activeEnvKey]: { ...activeEnv, variables: nextVars, secrets: nextSecrets },
       },
     };
-    setLocalEnv(next);
+    updateEnv(() => next);
   };
 
   const removeVar = (key: string) => {
-    markDirty();
     const nextVars = { ...activeEnv.variables };
     const nextSecrets = { ...(activeEnv.secrets || {}) };
     delete nextVars[key];
@@ -117,12 +109,11 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
         [activeEnvKey]: { ...activeEnv, variables: nextVars, secrets: nextSecrets },
       },
     };
-    setLocalEnv(next);
+    updateEnv(() => next);
   };
 
   const renameEnv = (newName: string) => {
-    markDirty();
-    setLocalEnv((prev) => ({
+    updateEnv((prev) => ({
       ...prev,
       envs: { ...prev.envs, [activeEnvKey]: { ...activeEnv, name: newName } },
     }));
@@ -130,16 +121,15 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
 
   const handleSave = async () => {
     await saveEnv(localEnv);
-    setIsDirty(false);
+    setDraftEnv(null);
     setStatus({ tone: 'success', message: 'Environment saved' });
     onClose();
   };
 
   const toggleSecret = (key: string) => {
-    markDirty();
     const nextSecrets = { ...(activeEnv.secrets || {}) };
     nextSecrets[key] = !nextSecrets[key];
-    setLocalEnv((prev) => ({
+    updateEnv((prev) => ({
       ...prev,
       envs: {
         ...prev.envs,
@@ -154,7 +144,7 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
       message: 'Discard unsaved environment changes?',
     });
     if (!shouldClose) return;
-    setIsDirty(false);
+    setDraftEnv(null);
     onClose();
   };
 
@@ -226,8 +216,7 @@ export const EnvironmentPanel = ({ open, onClose }: EnvPanelProps) => {
                 className="bg-white border border-border rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
                 value={activeEnvKey}
                 onChange={(e) => {
-                  markDirty();
-                  setLocalEnv((prev) => ({ ...prev, active_env: e.target.value }));
+                  updateEnv((prev) => ({ ...prev, active_env: e.target.value }));
                 }}
               >
                 {envNames.map((key) => (

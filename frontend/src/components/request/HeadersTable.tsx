@@ -3,6 +3,7 @@ import { Trash2, Plus, Lock, Unlock } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useKeyValueTableNavigation } from '../../lib/forms/useKeyValueTableNavigation';
 import { TableValidationNotice } from './TableValidationNotice';
+import { applyRowPatchWithTrailingEmpty } from '../../lib/forms/trailingEmptyRow';
 
 export type HeaderRow = { key: string; value: string; enabled?: boolean; secret?: boolean };
 
@@ -12,6 +13,9 @@ type Props = {
   showSecrets?: boolean;
   duplicateKeyIndexes?: Set<number>;
   missingKeyIndexes?: Set<number>;
+  unresolvedKeyIndexes?: Set<number>;
+  unresolvedValueIndexes?: Set<number>;
+  variableSuggestions?: string[];
 };
 
 export const HeadersTable = ({
@@ -20,7 +24,11 @@ export const HeadersTable = ({
   showSecrets = false,
   duplicateKeyIndexes,
   missingKeyIndexes,
+  unresolvedKeyIndexes,
+  unresolvedValueIndexes,
+  variableSuggestions,
 }: Props) => {
+  const variableListId = 'headers-variable-suggestions';
   // Ensure there's always at least one empty row
   useEffect(() => {
     if (!headers || headers.length === 0) {
@@ -60,19 +68,14 @@ export const HeadersTable = ({
       Boolean(displayHeaders[rowIndex]?.key?.trim() || displayHeaders[rowIndex]?.value?.trim()) || hasMultiple,
   });
 
-  // Auto-expand: add new row when user types in the last row
+  // Auto-expand once when the last row changes from empty -> non-empty.
   const handleChange = (idx: number, patch: Partial<HeaderRow>) => {
-    updateHeader(idx, patch);
-
-    // If this is the last row and user is typing, add a new row
-    const isLastRow = idx === headers.length - 1;
-    const hasContent = (patch.key && patch.key.trim()) || (patch.value && patch.value.trim());
-
-    if (isLastRow && hasContent) {
-      setTimeout(() => {
-        addHeader();
-      }, 50);
-    }
+    const next = applyRowPatchWithTrailingEmpty(headers || [], idx, patch, () => ({
+      key: '',
+      value: '',
+      enabled: true,
+    }));
+    onChange(next);
   };
 
   const toggleAll = () => {
@@ -131,12 +134,13 @@ export const HeadersTable = ({
                   type="text"
                   className={cn(
                     "w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded font-mono",
-                    (duplicateKeyIndexes?.has(idx) || missingKeyIndexes?.has(idx)) && "bg-amber-50 ring-1 ring-amber-300"
+                    (duplicateKeyIndexes?.has(idx) || missingKeyIndexes?.has(idx) || unresolvedKeyIndexes?.has(idx)) && "bg-amber-50 ring-1 ring-amber-300"
                   )}
                   placeholder="Content-Type"
                   value={header.key || ''}
                   onChange={(e) => handleChange(idx, { key: e.target.value })}
                   disabled={header.enabled === false}
+                  list={variableSuggestions?.length ? variableListId : undefined}
                   {...getCellProps(idx, 'key')}
                 />
               </div>
@@ -145,11 +149,15 @@ export const HeadersTable = ({
               <div className="flex-1 px-2">
                 <input
                   type="text"
-                  className="w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded"
+                  className={cn(
+                    "w-full bg-transparent border-none px-2 py-1.5 text-sm focus:outline-none focus:bg-white focus:ring-1 focus:ring-primary rounded",
+                    unresolvedValueIndexes?.has(idx) && "bg-amber-50 ring-1 ring-amber-300",
+                  )}
                   placeholder="application/json"
                   value={header.value || ''}
                   onChange={(e) => handleChange(idx, { value: e.target.value })}
                   disabled={header.enabled === false}
+                  list={variableSuggestions?.length ? variableListId : undefined}
                   {...getCellProps(idx, 'value')}
                 />
               </div>
@@ -193,6 +201,13 @@ export const HeadersTable = ({
 
       {/* Add Row Button */}
       <div className="px-2 py-2 border-t border-border bg-muted/30">
+        {variableSuggestions?.length ? (
+          <datalist id={variableListId}>
+            {variableSuggestions.map((option) => (
+              <option key={option} value={option} />
+            ))}
+          </datalist>
+        ) : null}
         <TableValidationNotice
           duplicateCount={duplicateKeyIndexes?.size}
           missingKeyCount={missingKeyIndexes?.size}

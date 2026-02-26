@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useActiveRequestStore } from '../../stores/useActiveRequestStore';
 import { useLastResultsQuery } from '../../hooks/useLastResults';
 import { Clock, AlertCircle, Copy } from 'lucide-react';
@@ -17,7 +17,9 @@ export const ResponseViewer = () => {
       : result;
   const activeRequestInfo = activeRequestId ? sentByRequest[activeRequestId] : null;
   const [tab, setTab] = useState<'json' | 'raw' | 'headers' | 'request'>('json');
-  const [forceJsonRender, setForceJsonRender] = useState(false);
+  const [forceJsonRenderByResult, setForceJsonRenderByResult] = useState<Record<string, boolean>>({});
+  const activeResultKey = activeResult ? `${activeResult.request_id}:${activeResult.timestamp}` : '';
+  const forceJsonRender = Boolean(activeResultKey && forceJsonRenderByResult[activeResultKey]);
 
   const rawBody = useMemo(() => {
     if (!activeResult) return '';
@@ -41,11 +43,6 @@ export const ResponseViewer = () => {
         : '',
     [activeResult, rawBody],
   );
-
-  useEffect(() => {
-    if (!activeResult) return;
-    setForceJsonRender(false);
-  }, [activeResult?.request_id, activeResult?.timestamp]);
 
   const jsonAnalysis = useMemo(() => {
     if (!activeResult || tab !== 'json') return null;
@@ -191,7 +188,12 @@ export const ResponseViewer = () => {
                   <button
                     className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors"
                     type="button"
-                    onClick={() => setForceJsonRender(true)}
+                    onClick={() =>
+                      setForceJsonRenderByResult((prev) => ({
+                        ...prev,
+                        [activeResultKey]: true,
+                      }))
+                    }
                   >
                     Try JSON View Anyway
                   </button>
@@ -200,7 +202,7 @@ export const ResponseViewer = () => {
             )}
 
             {jsonAnalysis?.parsed && (!jsonAnalysis.complexity?.tooComplex || forceJsonRender) && (
-              <VirtualJsonViewer data={jsonAnalysis.parsed} />
+              <VirtualJsonViewer key={activeResultKey || 'json-viewer'} data={jsonAnalysis.parsed} />
             )}
           </div>
         )}

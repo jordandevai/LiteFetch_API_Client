@@ -6,6 +6,7 @@ interface ActiveRequestState {
   result: RequestResult | null;
   runningByRequest: Record<string, boolean>;
   runningCount: number;
+  dirtyByRequest: Record<string, boolean>;
   resultsByRequest: Record<string, RequestResult>;
   sentByRequest: Record<string, any>;
   requestSelectionGuard: ((nextId: string | null) => boolean) | null;
@@ -15,6 +16,7 @@ interface ActiveRequestState {
   setResult: (res: RequestResult | null, requestId?: string) => void;
   setRequestRunning: (requestId: string, val: boolean) => void;
   setSentRequest: (requestId: string, sent: any) => void;
+  setRequestDirty: (requestId: string, val: boolean) => void;
 }
 
 export const useActiveRequestStore = create<ActiveRequestState>((set) => ({
@@ -22,6 +24,7 @@ export const useActiveRequestStore = create<ActiveRequestState>((set) => ({
   result: null,
   runningByRequest: {},
   runningCount: 0,
+  dirtyByRequest: {},
   resultsByRequest: {},
   sentByRequest: {},
   requestSelectionGuard: null,
@@ -55,4 +58,11 @@ export const useActiveRequestStore = create<ActiveRequestState>((set) => ({
     set((state) => ({
       sentByRequest: { ...state.sentByRequest, [requestId]: sent },
     })),
+  setRequestDirty: (requestId, val) =>
+    set((state) => {
+      const next = { ...state.dirtyByRequest };
+      if (val) next[requestId] = true;
+      else delete next[requestId];
+      return { dirtyByRequest: next };
+    }),
 }));

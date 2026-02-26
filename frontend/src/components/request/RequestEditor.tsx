@@ -1,201 +1,64 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Editor from 'react-simple-code-editor';
-import { highlight, languages } from 'prismjs';
-import 'prismjs/components/prism-json';
-import 'prismjs/themes/prism.css';
-import { Play, Save, Plus, Trash2, Upload } from 'lucide-react';
-import { useForm, useFieldArray, useWatch, type Control } from 'react-hook-form';
+import { useForm, useFieldArray, useWatch } from 'react-hook-form';
 import { useActiveRequestStore } from '../../stores/useActiveRequestStore';
 import { useActiveCollectionStore } from '../../stores/useActiveCollectionStore';
 import { useQueryClient } from '@tanstack/react-query';
-import { LiteAPI, type ExtractionRule, type HttpRequest } from '../../lib/api';
+import { LiteAPI, type HttpRequest } from '../../lib/api';
 import {
   useActiveRequestFromCollection,
   useSaveRequestMutation,
 } from '../../hooks/useCollectionData';
 import { useSaveLastResultMutation } from '../../hooks/useLastResults';
+import { useEnvironmentQuery } from '../../hooks/useEnvironmentData';
 import { useHotkeys } from '../../hooks/useHotkeys';
-import { FormTable } from './FormTable';
-import { FormDataTable, type FormDataRow } from './FormDataTable';
-import { HeadersTable, HeaderRow } from './HeadersTable';
 import { cn } from '../../lib/utils';
 import { useWorkspaceLockStore } from '../../stores/useWorkspaceLockStore';
-import { useBiDirectionalSync } from '../../lib/formSync/useBiDirectionalSync';
+import { useRequestRevisionStore } from '../../stores/useRequestRevisionStore';
 import { useUnsavedChangesGuard } from '../../lib/state/useUnsavedChangesGuard';
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/Dialog';
 import { KeyValueEditorDialog } from '../ui/KeyValueEditorDialog';
+import { PromptDialog } from '../ui/PromptDialog';
+import { RequestBodyTab } from './RequestBodyTab';
+import { RequestAuthTab } from './RequestAuthTab';
+import { RequestHeadersTab } from './RequestHeadersTab';
+import { RequestParamsTab } from './RequestParamsTab';
+import { RequestSettingsTab } from './RequestSettingsTab';
+import { RequestTopBar } from './RequestTopBar';
+import { UrlEditorDialog } from './UrlEditorDialog';
 import {
   findDuplicateKeyIndexes,
   findMissingKeyIndexes,
   validateRequestForSubmit,
 } from '../../lib/forms/requestValidation';
+import { jsonTextToKeyValueRows, keyValueRowsToJsonText } from '../../lib/body/transformers';
+import { detectPastedContent } from '../../lib/paste/autoDetect';
+import { buildUrlWithParams, decodeUrlForEditor, encodeUrlForRequest, parseQueryParamsFromUrl, prettyFormatUrlQuery } from '../../lib/forms/requestUrl';
+import { buildEnvironmentVariableContext, buildVariableTemplateSuggestions, findUnresolvedVariables } from '../../lib/variables/engine';
+import {
+  deleteRequestTemplate,
+  getRequestTemplate,
+  listRequestTemplates,
+  saveRequestTemplate,
+  type RequestTemplate,
+} from '../../lib/templates/requestTemplates';
+import { getRequestPresetById, REQUEST_PRESETS } from '../../lib/presets/requestPresets';
+import { BODY_SNIPPETS, getBodySnippetById } from '../../lib/snippets/requestSnippets';
+import {
+  areQueryRowsEqual,
+  buildRequestFromForm,
+  deriveAuthFromHeaders,
+  prepareRequestForSend,
+  toHeadersArray,
+  type FormValues,
+} from './requestEditorModel';
 
-const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
-
-const fileToBase64 = (file: File): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result;
-      if (typeof result === 'string') {
-        const commaIdx = result.indexOf(',');
-        resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
-      } else if (result instanceof ArrayBuffer) {
-        const bytes = new Uint8Array(result);
-        let binary = '';
-        bytes.forEach((b) => (binary += String.fromCharCode(b)));
-        resolve(btoa(binary));
-      } else {
-        reject(new Error('Unsupported file result'));
-      }
-    };
-    reader.onerror = () => reject(reader.error || new Error('File read failed'));
-    reader.readAsDataURL(file);
-  });
-
-const BinaryPickerButton = ({
-  onPick,
-  disabled,
-  current,
-}: {
-  onPick: (payload: { file_path?: string; file_inline?: string; file_name?: string } | null) => void;
-  disabled?: boolean;
-  current: { file_path?: string; file_inline?: string; file_name?: string } | null;
-}) => {
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const handlePick = async () => {
-    if (isTauri) {
-      try {
-        const { open } = await import('@tauri-apps/plugin-dialog');
-        const selected = await open({ multiple: false });
-        if (!selected || Array.isArray(selected)) return;
-        const parts = String(selected).split(/[\\/]/);
-        onPick({ file_path: String(selected), file_inline: undefined, file_name: parts[parts.length - 1] || 'upload.bin' });
-      } catch (e) {
-        console.error('Binary pick failed', e);
-      }
-      return;
-    }
-    inputRef.current?.click();
-  };
-
-  const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    try {
-      const b64 = await fileToBase64(file);
-      onPick({ file_inline: b64, file_name: file.name, file_path: undefined });
-    } catch (err) {
-      console.error('Binary file read failed', err);
-    }
-  };
-
-  return (
-    <>
-      <button
-        type="button"
-        className="px-3 py-2 text-xs rounded border border-border bg-white hover:bg-muted transition-colors font-medium flex items-center gap-1"
-        onClick={handlePick}
-        disabled={disabled}
-      >
-        <Upload size={14} />
-        {current?.file_path || current?.file_inline ? 'Replace file' : 'Pick file'}
-      </button>
-      <input type="file" className="hidden" ref={inputRef} onChange={onFileChange} />
-    </>
-  );
-};
-
-type FormValues = {
-  name: string;
-  method: string;
-  url: string;
-  body: string;
-  body_mode: 'raw' | 'json' | 'form-urlencoded' | 'form-data' | 'binary';
-  headers: HeaderRow[];
-  extract_rules: ExtractionRule[];
-  form_body: FormDataRow[];
-  query_params: Array<{ key: string; value: string; enabled?: boolean; secret?: boolean }>;
-  auth_type: 'none' | 'basic' | 'bearer';
-  auth_params: Record<string, string>;
-  secret_headers: Record<string, boolean>;
-  secret_query_params: Record<string, boolean>;
-  secret_form_fields: Record<string, boolean>;
-  secret_auth_params: Record<string, boolean>;
-  secret_body: boolean;
-  binary: { file_path?: string; file_inline?: string; file_name?: string } | null;
-};
-
-const toHeadersArray = (headers: Record<string, string> = {}): HeaderRow[] =>
-  Object.entries(headers).map(([key, value]) => ({ key, value, enabled: true }));
-
-const toHeadersRecord = (rows: HeaderRow[]) => {
-  const next: Record<string, string> = {};
-  rows.forEach(({ key, value, enabled }) => {
-    const trimmed = key.trim();
-    // Only include enabled headers
-    if (trimmed && enabled !== false) next[trimmed] = value;
-  });
-  return next;
-};
-
-const normalizeJMESPath = (path: string) => {
-  const trimmed = path.trim();
-  const prefixes = ['body.', 'response.', '$.'];
-  for (const prefix of prefixes) {
-    if (trimmed.startsWith(prefix)) {
-      return trimmed.slice(prefix.length);
-    }
-  }
-  return trimmed;
-};
-
-type HeadersTabProps = {
-  control: Control<FormValues>;
-  onHeadersChange: (headers: HeaderRow[]) => void;
-  duplicateKeyIndexes?: Set<number>;
-  missingKeyIndexes?: Set<number>;
-};
-
-const EMPTY_HEADER: HeaderRow = { key: '', value: '', enabled: true };
-
-const HeadersTab = React.memo(({ control, onHeadersChange, duplicateKeyIndexes, missingKeyIndexes }: HeadersTabProps) => {
-  const { fields, replace } = useFieldArray({ control, name: 'headers' });
-  const headers = useWatch({ control, name: 'headers' }) as HeaderRow[] | undefined;
-
-  // Keep at least one row present
-  useEffect(() => {
-    if (!fields.length) {
-      replace([EMPTY_HEADER]);
-    }
-  }, [fields.length, replace]);
-
-  const handleReplace = useCallback(
-    (rows: HeaderRow[]) => {
-      replace(rows);
-      onHeadersChange(rows);
-    },
-    [onHeadersChange, replace],
-  );
-
-  return (
-    <div className="p-4 bg-card h-full">
-      <HeadersTable
-        headers={headers || [EMPTY_HEADER]}
-        onChange={handleReplace}
-        showSecrets
-        duplicateKeyIndexes={duplicateKeyIndexes}
-        missingKeyIndexes={missingKeyIndexes}
-      />
-    </div>
-  );
-});
-HeadersTab.displayName = 'HeadersTab';
+const MAX_HISTORY_BODY_CHARS = 120_000;
+const MAX_AUTOSAVE_BODY_CHARS = 80_000;
+const AUTOSAVE_DELAY_MS = 1200;
+const LARGE_BODY_AUTOSAVE_DELAY_MS = 2500;
 
 export const RequestEditor = () => {
-  const { activeRequestId, runningByRequest, setRequestRunning, setResult, setSentRequest, setRequestSelectionGuard } = useActiveRequestStore();
+  const { activeRequestId, runningByRequest, setRequestRunning, setResult, setSentRequest, setRequestSelectionGuard, setRequestDirty } =
+    useActiveRequestStore();
   const activeRequest = useActiveRequestFromCollection(activeRequestId);
   const { mutateAsync: saveRequest, isPending: isSaving } = useSaveRequestMutation();
   const { mutateAsync: saveLastResult } = useSaveLastResultMutation();
@@ -205,11 +68,23 @@ export const RequestEditor = () => {
   const [urlDraftDirty, setUrlDraftDirty] = useState(false);
   const [saveState, setSaveState] = useState<'saved' | 'unsaved' | 'saving' | 'error'>('saved');
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [transformNotice, setTransformNotice] = useState<string | null>(null);
+  const [templates, setTemplates] = useState<RequestTemplate[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [selectedPresetId, setSelectedPresetId] = useState('');
+  const [selectedBodySnippetId, setSelectedBodySnippetId] = useState('');
+  const [templateNamePromptOpen, setTemplateNamePromptOpen] = useState(false);
   const { isLocked, openModal } = useWorkspaceLockStore();
-  const [isEditingUrl, setIsEditingUrl] = useState(false);
+  const byRequestRevisions = useRequestRevisionStore((s) => s.byRequest);
+  const initRequestHistory = useRequestRevisionStore((s) => s.initRequestHistory);
+  const captureSnapshot = useRequestRevisionStore((s) => s.captureSnapshot);
+  const undoRevision = useRequestRevisionStore((s) => s.undo);
+  const redoRevision = useRequestRevisionStore((s) => s.redo);
+  const clearRequestHistory = useRequestRevisionStore((s) => s.clearRequestHistory);
+  const [, setIsEditingUrl] = useState(false);
+  const applyingRevisionRef = useRef(false);
   const urlInputRef = useRef<HTMLInputElement | null>(null);
   const { confirmDiscard } = useUnsavedChangesGuard();
-  const { markFromLeft, markFromRight, consumeIfFromLeft, consumeIfFromRight, resetSyncOrigin } = useBiDirectionalSync();
   const [paramEditor, setParamEditor] = useState<{
     index: number;
     key: string;
@@ -219,6 +94,8 @@ export const RequestEditor = () => {
     { combo: 'mod+s', handler: () => void handleSave() },
     { combo: 'mod+enter', handler: () => void handleRun() },
     { combo: 'mod+l', handler: () => urlInputRef.current?.focus() },
+    { combo: 'mod+z', handler: () => void handleUndo() },
+    { combo: 'mod+shift+z', handler: () => void handleRedo() },
   ]);
 
   const {
@@ -250,7 +127,6 @@ export const RequestEditor = () => {
       binary: null,
     },
   });
-  const urlValue = watch('url');
   const queryParams = watch('query_params');
   const headersRows = watch('headers');
   const formBodyRows = watch('form_body');
@@ -258,8 +134,10 @@ export const RequestEditor = () => {
   const authParams = watch('auth_params');
   const secretBody = watch('secret_body');
   const secretAuthParams = watch('secret_auth_params');
+  const bodyValue = watch('body');
   const autoSaveSnapshot = useWatch({ control });
   const isDirty = formState.isDirty;
+  const { data: environmentData } = useEnvironmentQuery();
 
   const queryClient = useQueryClient();
   const headerDuplicateIndexes = useMemo(() => findDuplicateKeyIndexes(headersRows || []), [headersRows]);
@@ -275,96 +153,47 @@ export const RequestEditor = () => {
     name: 'extract_rules',
   });
 
-  const normalizeUrlForParse = useCallback((url: string) => {
-    return url.replace(/\?\?/g, '?').replace(/%3F/gi, '?');
-  }, []);
-
-  const parseQueryParamsFromUrl = useCallback(
-    (url: string): Array<{ key: string; value: string; enabled?: boolean; secret?: boolean }> => {
-      try {
-        const normalized = normalizeUrlForParse(url);
-        const hasProtocol = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(normalized);
-        const parsed = new URL(normalized, hasProtocol ? undefined : 'http://placeholder.local');
-        // Normalize double/leading ? in search
-        if (parsed.search.startsWith('??')) {
-          parsed.search = parsed.search.replace(/^\?+/, '?');
-        }
-        const params: Array<{ key: string; value: string; enabled?: boolean; secret?: boolean }> = [];
-        parsed.searchParams.forEach((value, key) => {
-          const cleanKey = key.replace(/^\?+/, '');
-          params.push({ key: cleanKey, value, enabled: true });
-        });
-        return params.length ? params : [{ key: '', value: '', enabled: true }];
-      } catch {
-        return [{ key: '', value: '', enabled: true }];
+  const syncQueryParamsFromUrl = useCallback(
+    (url: unknown, shouldDirty: boolean) => {
+      const nextUrl = decodeUrlForEditor(url);
+      const currentUrl = getValues('url') || '';
+      if (nextUrl !== currentUrl) {
+        setValue('url', nextUrl, { shouldDirty });
       }
+      const parsed = parseQueryParamsFromUrl(nextUrl);
+      const current = getValues('query_params') || [];
+      if (areQueryRowsEqual(parsed, current)) return;
+      setValue('query_params', parsed, { shouldDirty });
     },
-    [normalizeUrlForParse],
+    [getValues, setValue],
   );
 
-  const buildUrlWithParams = useCallback((url: string, params: Array<{ key: string; value: string; enabled?: boolean }>) => {
-    try {
-      const normalized = normalizeUrlForParse(url || '');
-      const hasProtocol = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(normalized);
-      const parsed = new URL(normalized, hasProtocol ? undefined : 'http://placeholder.local');
-      const next = new URLSearchParams();
-      (params || []).forEach((row) => {
-        if (row.enabled === false) return;
-        const key = (row.key || '').trim();
-        if (!key) return;
-        next.append(key, row.value ?? '');
-      });
-      parsed.search = next.toString() ? `?${next.toString()}` : '';
-      if (hasProtocol) {
-        return parsed.toString();
+  const applyQueryParams = useCallback(
+    (rows: Array<{ key: string; value?: string; enabled?: boolean; secret?: boolean }>, shouldDirty = true) => {
+      const normalizedRows = rows.map((r) => ({ ...r, value: r.value ?? '' }));
+      setValue('query_params', normalizedRows, { shouldDirty });
+      const currentUrl = getValues('url') || '';
+      const nextUrl = buildUrlWithParams(currentUrl, normalizedRows);
+      if (nextUrl !== currentUrl) {
+        setValue('url', nextUrl, { shouldDirty });
       }
-      return `${parsed.pathname || ''}${parsed.search || ''}${parsed.hash || ''}`;
-    } catch {
-      return url;
-    }
-  }, []);
-
-  const deriveAuthFromHeaders = useCallback(
-    (headers: Record<string, string> | undefined, currentType: FormValues['auth_type'], currentParams: Record<string, string>) => {
-      const authHeader = headers?.Authorization || headers?.authorization;
-      if (!authHeader) return { auth_type: currentType, auth_params: currentParams };
-      if (currentType && currentType !== 'none') return { auth_type: currentType, auth_params: currentParams };
-
-      if (/^Bearer\s+/i.test(authHeader)) {
-        const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-        return { auth_type: 'bearer' as const, auth_params: { token } };
-      }
-      if (/^Basic\s+/i.test(authHeader)) {
-        const b64 = authHeader.replace(/^Basic\s+/i, '').trim();
-        try {
-          const decoded = atob(b64);
-          const idx = decoded.indexOf(':');
-          const username = idx >= 0 ? decoded.slice(0, idx) : decoded;
-          const password = idx >= 0 ? decoded.slice(idx + 1) : '';
-          return { auth_type: 'basic' as const, auth_params: { username, password } };
-        } catch {
-          return { auth_type: currentType, auth_params: currentParams };
-        }
-      }
-      return { auth_type: currentType, auth_params: currentParams };
     },
-    [],
+    [getValues, setValue],
   );
 
   // Reset form when active request changes
   useEffect(() => {
     if (!activeRequest) return;
-    resetSyncOrigin();
     const headersRecord = activeRequest.headers || {};
     const derived = deriveAuthFromHeaders(headersRecord, (activeRequest.auth_type as any) || 'none', activeRequest.auth_params || {});
     const secretHeaderMap = activeRequest.secret_headers || {};
     const secretQueryMap = activeRequest.secret_query_params || {};
     const secretFormMap = activeRequest.secret_form_fields || {};
     const secretAuthMap = activeRequest.secret_auth_params || {};
-    reset({
+    const initialValues: FormValues = {
       name: activeRequest.name,
       method: activeRequest.method,
-      url: activeRequest.url,
+      url: decodeUrlForEditor(typeof activeRequest.url === 'string' ? activeRequest.url : ''),
       body:
         typeof activeRequest.body === 'string'
           ? activeRequest.body || ''
@@ -395,129 +224,25 @@ export const RequestEditor = () => {
       secret_auth_params: secretAuthMap,
       secret_body: Boolean(activeRequest.secret_body),
       binary: activeRequest.binary || null,
-    });
+    };
+    reset(initialValues);
+    if ((initialValues.body || '').length <= MAX_HISTORY_BODY_CHARS) {
+      initRequestHistory(activeRequest.id, initialValues);
+    } else {
+      clearRequestHistory(activeRequest.id);
+    }
     setSaveState('saved');
-  }, [activeRequest, reset, parseQueryParamsFromUrl, deriveAuthFromHeaders, resetSyncOrigin]);
-
-  // Sync URL -> Params
-  useEffect(() => {
-    if (consumeIfFromRight()) {
-      return;
-    }
-    if (isEditingUrl) return;
-    const parsed = parseQueryParamsFromUrl(urlValue || '');
-    markFromLeft();
-    setValue('query_params', parsed, { shouldDirty: false });
-  }, [consumeIfFromRight, isEditingUrl, markFromLeft, parseQueryParamsFromUrl, setValue, urlValue]);
-
-  // Sync Params -> URL
-  useEffect(() => {
-    if (consumeIfFromLeft()) {
-      return;
-    }
-    if (isEditingUrl) return;
-    const nextUrl = buildUrlWithParams(urlValue || '', queryParams || []);
-    if (nextUrl !== urlValue) {
-      markFromRight();
-      setValue('url', nextUrl, { shouldDirty: true });
-    }
-  }, [buildUrlWithParams, consumeIfFromLeft, isEditingUrl, markFromRight, queryParams, setValue, urlValue]);
+    setTransformNotice(null);
+  }, [activeRequest, reset, initRequestHistory, clearRequestHistory]);
 
   const buildRequest = useMemo(() => {
-    return (values: FormValues): HttpRequest => {
-      const headersRecord = toHeadersRecord(values.headers || []);
-      const secretHeaders: Record<string, boolean> = {};
-      (values.headers || []).forEach((row) => {
-        const key = (row.key || '').trim();
-        if (key && row.secret) secretHeaders[key] = true;
-      });
-
-      const secretQuery: Record<string, boolean> = {};
-      (values.query_params || []).forEach((row) => {
-        const key = (row.key || '').trim();
-        if (key && row.secret) secretQuery[key] = true;
-      });
-
-      const secretForm: Record<string, boolean> = {};
-      (values.form_body || []).forEach((row) => {
-        const key = (row.key || '').trim();
-        const rowType = (row.type || 'text').toLowerCase();
-        if (rowType === 'text' && key && row.secret) secretForm[key] = true;
-      });
-
-      const secretAuth: Record<string, boolean> = {};
-      Object.entries(values.secret_auth_params || {}).forEach(([k, v]) => {
-        if (v) secretAuth[k] = true;
-      });
-
-      return {
-        ...activeRequest!,
-        name: values.name || 'New Request',
-        method: values.method,
-        url: values.url,
-        headers: headersRecord,
-        query_params: values.query_params || [],
-        auth_type: values.auth_type,
-        auth_params: values.auth_params || {},
-        body: values.body ?? null,
-        body_mode: values.body_mode,
-        form_body: values.form_body ?? [],
-        extract_rules: (values.extract_rules ?? []).map((rule) => ({
-          ...rule,
-          source_path: normalizeJMESPath(rule.source_path || ''),
-        })),
-        secret_headers: secretHeaders,
-        secret_query_params: secretQuery,
-        secret_form_fields: secretForm,
-        secret_auth_params: secretAuth,
-        secret_body: Boolean(values.secret_body),
-        binary: values.binary || null,
-      };
-    };
+    if (!activeRequest) return null;
+    return (values: FormValues): HttpRequest => buildRequestFromForm(activeRequest, values);
   }, [activeRequest]);
-
-  const prepareForSend = (req: HttpRequest): HttpRequest => {
-    const headers = { ...(req.headers || {}) };
-    let body = req.body;
-    let formBody = req.form_body || [];
-    let binaryPayload = req.binary || null;
-
-    if (req.body_mode === 'json' && body && typeof body !== 'string') {
-      body = JSON.stringify(body);
-      if (!headers['Content-Type']) headers['Content-Type'] = 'application/json';
-    }
-
-    // Strip empty form rows
-    if (req.body_mode === 'form-urlencoded' || req.body_mode === 'form-data') {
-      formBody = (formBody || []).filter((row) => {
-        if (row.enabled === false) return false;
-        const key = (row.key || '').trim();
-        if (!key) return false;
-        if ((row.type || 'text') === 'text') {
-          return true;
-        }
-        // For file/binary rows, ensure at least a path or inline blob exists
-        return Boolean(row.file_path || row.file_inline);
-      });
-    }
-
-    // For urlencoded and form-data, pass through form_body so backend can construct payload/multipart.
-    // Avoid pre-encoding here to keep file paths intact for backend multipart assembly.
-    if (req.body_mode === 'form-urlencoded' && !headers['Content-Type']) {
-      headers['Content-Type'] = 'application/x-www-form-urlencoded';
-    }
-    // Do NOT set Content-Type for multipart/form-data; httpx will set the boundary.
-
-    if (req.body_mode !== 'binary') {
-      binaryPayload = null;
-    }
-
-    return { ...req, headers, body: body ?? null, form_body: formBody, binary: binaryPayload };
-  };
 
   const performSave = useCallback(
     async (mode: 'manual' | 'auto') => {
-      if (!activeRequest || !activeCollectionId || isLocked) return;
+      if (!activeRequest || !activeCollectionId || isLocked || !buildRequest) return;
       if (mode === 'auto' && isSaving) return;
       const values = getValues();
       const updated = buildRequest(values);
@@ -586,8 +311,9 @@ export const RequestEditor = () => {
       return;
     }
     setValidationError(null);
+    if (!buildRequest) return;
     const baseReq = buildRequest(getValues());
-    const prepared = prepareForSend(baseReq);
+    const prepared = prepareRequestForSend(baseReq);
     setSentRequest(prepared.id, prepared);
     setRequestRunning(prepared.id, true);
     try {
@@ -613,7 +339,9 @@ export const RequestEditor = () => {
   };
 
   const openUrlEditor = useCallback(() => {
-    setUrlDraft(getValues('url') || '');
+    const rawUrl = getValues('url');
+    const safeUrl = typeof rawUrl === 'string' ? rawUrl : rawUrl == null ? '' : String(rawUrl);
+    setUrlDraft(safeUrl);
     setUrlDraftDirty(false);
     setShowUrlEditor(true);
     setIsEditingUrl(true);
@@ -631,45 +359,373 @@ export const RequestEditor = () => {
   }, [confirmDiscard, urlDraftDirty]);
 
   const saveAndCloseUrlEditor = useCallback(() => {
-    const nextUrl = urlDraft.trim();
-    const currentUrl = getValues('url') || '';
+    const nextUrl = decodeUrlForEditor(urlDraft.trim());
+    const rawCurrent = getValues('url');
+    const currentUrl = typeof rawCurrent === 'string' ? rawCurrent : rawCurrent == null ? '' : String(rawCurrent);
     setValue('url', nextUrl, { shouldDirty: nextUrl !== currentUrl });
+    syncQueryParamsFromUrl(nextUrl, false);
     setShowUrlEditor(false);
     setIsEditingUrl(false);
     setUrlDraftDirty(false);
-  }, [getValues, setValue, urlDraft]);
+  }, [getValues, setValue, syncQueryParamsFromUrl, urlDraft]);
+
+  const decodeUrlDraftForEdit = useCallback(() => {
+    const next = decodeUrlForEditor(urlDraft);
+    setUrlDraft(next);
+    setUrlDraftDirty(true);
+  }, [urlDraft]);
+
+  const prettyFormatUrlDraft = useCallback(() => {
+    const next = prettyFormatUrlQuery(urlDraft);
+    setUrlDraft(next);
+    setUrlDraftDirty(true);
+  }, [urlDraft]);
 
   useEffect(() => {
     setSaveState((prev) => (isDirty ? (prev === 'saving' ? prev : 'unsaved') : 'saved'));
   }, [isDirty]);
 
   useEffect(() => {
+    if (!activeRequestId) return;
+    setRequestDirty(activeRequestId, isDirty);
+  }, [activeRequestId, isDirty, setRequestDirty]);
+
+  useEffect(() => {
     if (validationError) setValidationError(null);
   }, [autoSaveSnapshot]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!activeRequest || !activeCollectionId || isLocked || !isDirty) return;
-    const timer = window.setTimeout(() => {
-      void performSave('auto');
-    }, 800);
-    return () => window.clearTimeout(timer);
-  }, [activeCollectionId, activeRequest, autoSaveSnapshot, isDirty, isLocked, performSave]);
+    setTemplates(listRequestTemplates());
+  }, []);
 
   useEffect(() => {
-    setRequestSelectionGuard(() =>
-      confirmDiscard({
+    if (!activeRequestId || applyingRevisionRef.current) return;
+    const timer = window.setTimeout(() => {
+      const snapshot = getValues();
+      if ((snapshot.body || '').length > MAX_HISTORY_BODY_CHARS) return;
+      captureSnapshot(activeRequestId, snapshot);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [activeRequestId, autoSaveSnapshot, captureSnapshot, getValues]);
+
+  useEffect(() => {
+    if (!activeRequest || !activeCollectionId || isLocked || !isDirty) return;
+    const hasLargeBody = (bodyValue || '').length > MAX_AUTOSAVE_BODY_CHARS;
+    const timer = window.setTimeout(() => {
+      void performSave('auto');
+    }, hasLargeBody ? LARGE_BODY_AUTOSAVE_DELAY_MS : AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [activeCollectionId, activeRequest, autoSaveSnapshot, bodyValue, isDirty, isLocked, performSave]);
+
+  useEffect(() => {
+    setRequestSelectionGuard((nextId) => {
+      const shouldSwitch = confirmDiscard({
         isDirty,
         message: 'You have unsaved request changes. Discard and switch requests?',
-      }),
-    );
+      });
+      if (shouldSwitch && activeRequestId && nextId !== activeRequestId) {
+        setRequestDirty(activeRequestId, false);
+      }
+      return shouldSwitch;
+    });
     return () => setRequestSelectionGuard(null);
-  }, [confirmDiscard, isDirty, setRequestSelectionGuard]);
+  }, [activeRequestId, confirmDiscard, isDirty, setRequestDirty, setRequestSelectionGuard]);
 
-  const bodyValue = watch('body');
   const bodyMode = watch('body_mode');
   const binary = watch('binary');
+  const urlValue = watch('url');
+  const activeRevisionState = activeRequestId ? byRequestRevisions[activeRequestId] : undefined;
+  const canUndo = Boolean(activeRevisionState && activeRevisionState.index > 0);
+  const canRedo = Boolean(activeRevisionState && activeRevisionState.index < activeRevisionState.entries.length - 1);
   const activeRequestRunning = activeRequestId ? Boolean(runningByRequest[activeRequestId]) : false;
+  const methodField = register('method');
   const urlField = register('url');
+  const activeEnvVars = useMemo(() => {
+    if (!environmentData) return {};
+    const key = environmentData.active_env;
+    return environmentData.envs?.[key]?.variables || {};
+  }, [environmentData]);
+  const variableContext = useMemo(() => buildEnvironmentVariableContext(activeEnvVars), [activeEnvVars]);
+  const variableSuggestions = useMemo(
+    () => buildVariableTemplateSuggestions(Object.keys(activeEnvVars || {})),
+    [activeEnvVars],
+  );
+  const urlUnresolvedVariables = useMemo(
+    () => findUnresolvedVariables(urlValue, variableContext).sort(),
+    [urlValue, variableContext],
+  );
+  const headerUnresolvedKeyIndexes = useMemo(() => {
+    const set = new Set<number>();
+    (headersRows || []).forEach((row, idx) => {
+      if (findUnresolvedVariables(row.key, variableContext).length) set.add(idx);
+    });
+    return set;
+  }, [headersRows, variableContext]);
+  const headerUnresolvedValueIndexes = useMemo(() => {
+    const set = new Set<number>();
+    (headersRows || []).forEach((row, idx) => {
+      if (findUnresolvedVariables(row.value, variableContext).length) set.add(idx);
+    });
+    return set;
+  }, [headersRows, variableContext]);
+  const queryUnresolvedKeyIndexes = useMemo(() => {
+    const set = new Set<number>();
+    (queryParams || []).forEach((row, idx) => {
+      if (findUnresolvedVariables(row.key, variableContext).length) set.add(idx);
+    });
+    return set;
+  }, [queryParams, variableContext]);
+  const queryUnresolvedValueIndexes = useMemo(() => {
+    const set = new Set<number>();
+    (queryParams || []).forEach((row, idx) => {
+      if (findUnresolvedVariables(row.value, variableContext).length) set.add(idx);
+    });
+    return set;
+  }, [queryParams, variableContext]);
+  const formUnresolvedKeyIndexes = useMemo(() => {
+    const set = new Set<number>();
+    (formBodyRows || []).forEach((row, idx) => {
+      if (findUnresolvedVariables(row.key, variableContext).length) set.add(idx);
+    });
+    return set;
+  }, [formBodyRows, variableContext]);
+  const formUnresolvedValueIndexes = useMemo(() => {
+    const set = new Set<number>();
+    (formBodyRows || []).forEach((row, idx) => {
+      if (findUnresolvedVariables(row.value, variableContext).length) set.add(idx);
+    });
+    return set;
+  }, [formBodyRows, variableContext]);
+  const encodedUrlPreview = useMemo(() => encodeUrlForRequest(urlDraft || urlValue || ''), [urlDraft, urlValue]);
+  const unresolvedVariableNames = useMemo(() => {
+    const names = new Set<string>();
+    const add = (value: unknown) => {
+      findUnresolvedVariables(value, variableContext).forEach((name) => names.add(name));
+    };
+    add(urlValue);
+    add(bodyValue);
+    (headersRows || []).forEach((row) => {
+      add(row.key);
+      add(row.value);
+    });
+    (queryParams || []).forEach((row) => {
+      add(row.key);
+      add(row.value);
+    });
+    Object.values(authParams || {}).forEach((value) => add(value));
+    return Array.from(names).sort();
+  }, [authParams, bodyValue, headersRows, queryParams, urlValue, variableContext]);
+  const unresolvedVariableCount = unresolvedVariableNames.length;
+
+  const handleConvertBodyToTable = useCallback(() => {
+    const source = String(getValues('body') || '');
+    const { rows, warning } = jsonTextToKeyValueRows(source);
+    if (!rows.length) {
+      setTransformNotice(warning || 'Unable to convert this body to table rows.');
+      return;
+    }
+    setValue(
+      'form_body',
+      rows.map((row) => ({ ...row, type: 'text' })),
+      { shouldDirty: true },
+    );
+    setValue('body_mode', 'form-urlencoded', { shouldDirty: true });
+    setTransformNotice(warning || `Converted ${rows.length} field(s) to table rows.`);
+  }, [getValues, setValue]);
+
+  const handleConvertTableToBody = useCallback(() => {
+    const rows = getValues('form_body') || [];
+    const text = keyValueRowsToJsonText(rows.map((row) => ({ key: row.key, value: row.value ?? '', enabled: row.enabled })));
+    setValue('body', text, { shouldDirty: true });
+    setValue('body_mode', 'json', { shouldDirty: true });
+    setTransformNotice('Converted table rows to JSON body.');
+  }, [getValues, setValue]);
+
+  const handleSmartPaste = useCallback(async () => {
+    try {
+      const raw = await navigator.clipboard.readText();
+      const detection = detectPastedContent(raw);
+      if (!detection.normalized.trim()) {
+        setTransformNotice('Clipboard is empty.');
+        return;
+      }
+      if (detection.kind === 'json') {
+        const { rows } = jsonTextToKeyValueRows(detection.normalized);
+        setValue('body', detection.normalized, { shouldDirty: true });
+        setValue('body_mode', 'json', { shouldDirty: true });
+        if (rows.length) {
+          setValue(
+            'form_body',
+            rows.map((row) => ({ ...row, type: 'text' })),
+            { shouldDirty: true },
+          );
+        }
+        setTransformNotice('Detected JSON and applied to body. Table conversion is ready.');
+        return;
+      }
+      if (detection.kind === 'urlencoded') {
+        const params = new URLSearchParams(detection.normalized);
+        const rows = Array.from(params.entries()).map(([key, value]) => ({
+          key,
+          value,
+          enabled: true,
+          type: 'text' as const,
+        }));
+        setValue('form_body', rows.length ? rows : [{ key: '', value: '', enabled: true, type: 'text' }], { shouldDirty: true });
+        setValue('body_mode', 'form-urlencoded', { shouldDirty: true });
+        setTransformNotice('Detected URL-encoded body and converted to table rows.');
+        return;
+      }
+      const mode = detection.kind === 'text' ? 'raw' : 'raw';
+      setValue('body', detection.normalized, { shouldDirty: true });
+      setValue('body_mode', mode, { shouldDirty: true });
+      setTransformNotice(`Detected ${detection.kind} and pasted as raw body.`);
+    } catch (err) {
+      console.error(err);
+      setTransformNotice('Clipboard read failed. Allow clipboard permission and try again.');
+    }
+  }, [setValue]);
+
+  const handleBodyModeChange = useCallback(
+    (nextMode: FormValues['body_mode']) => {
+      const currentMode = getValues('body_mode');
+      if ((nextMode === 'form-urlencoded' || nextMode === 'form-data') && (currentMode === 'json' || currentMode === 'raw')) {
+        const { rows, warning } = jsonTextToKeyValueRows(String(getValues('body') || ''));
+        if (rows.length) {
+          setValue(
+            'form_body',
+            rows.map((row) => ({ ...row, type: 'text' })),
+            { shouldDirty: true },
+          );
+          if (warning) setTransformNotice(warning);
+        }
+      }
+      if (nextMode === 'json' && (currentMode === 'form-urlencoded' || currentMode === 'form-data')) {
+        const rows = getValues('form_body') || [];
+        if ((getValues('body') || '').trim().length === 0 && rows.length) {
+          setValue(
+            'body',
+            keyValueRowsToJsonText(rows.map((row) => ({ key: row.key, value: row.value ?? '', enabled: row.enabled }))),
+            { shouldDirty: true },
+          );
+          setTransformNotice('Converted table rows to JSON when switching modes.');
+        }
+      }
+      setValue('body_mode', nextMode, { shouldDirty: true });
+    },
+    [getValues, setValue],
+  );
+
+  const handleSaveTemplate = useCallback(
+    (name: string) => {
+      const values = getValues();
+      const saved = saveRequestTemplate(name, {
+        method: values.method,
+        url: values.url,
+        body: values.body,
+        body_mode: values.body_mode,
+        headers: values.headers || [],
+        query_params: values.query_params || [],
+        form_body: values.form_body || [],
+        auth_type: values.auth_type,
+        auth_params: values.auth_params || {},
+      });
+      const next = listRequestTemplates();
+      setTemplates(next);
+      setSelectedTemplateId(saved.id);
+      setTemplateNamePromptOpen(false);
+      setTransformNotice(`Saved template "${saved.name}".`);
+    },
+    [getValues],
+  );
+
+  const handleApplyTemplate = useCallback(() => {
+    if (!selectedTemplateId) return;
+    const template = getRequestTemplate(selectedTemplateId);
+    if (!template) return;
+    const payload = template.payload;
+    setValue('method', payload.method, { shouldDirty: true });
+    setValue('url', decodeUrlForEditor(payload.url), { shouldDirty: true });
+    setValue('body', payload.body, { shouldDirty: true });
+    setValue('body_mode', payload.body_mode, { shouldDirty: true });
+    setValue('headers', payload.headers as any, { shouldDirty: true });
+    setValue('query_params', payload.query_params as any, { shouldDirty: true });
+    setValue('form_body', payload.form_body as any, { shouldDirty: true });
+    setValue('auth_type', payload.auth_type, { shouldDirty: true });
+    setValue('auth_params', payload.auth_params || {}, { shouldDirty: true });
+    if (!payload.query_params?.length) {
+      syncQueryParamsFromUrl(payload.url, true);
+    }
+    setTransformNotice(`Applied template "${template.name}".`);
+  }, [selectedTemplateId, setValue, syncQueryParamsFromUrl]);
+
+  const handleDeleteTemplate = useCallback(() => {
+    if (!selectedTemplateId) return;
+    deleteRequestTemplate(selectedTemplateId);
+    setTemplates(listRequestTemplates());
+    setSelectedTemplateId('');
+    setTransformNotice('Template deleted.');
+  }, [selectedTemplateId]);
+
+  const handleApplyPreset = useCallback(() => {
+    if (!selectedPresetId) return;
+    const preset = getRequestPresetById(selectedPresetId);
+    if (!preset) return;
+    const current = getValues();
+    const next = preset.apply({
+      headers: current.headers || [],
+      auth_type: current.auth_type,
+      auth_params: current.auth_params || {},
+      body_mode: current.body_mode,
+      body: current.body || '',
+    });
+    if (next.headers) setValue('headers', next.headers as any, { shouldDirty: true });
+    if (next.auth_type) setValue('auth_type', next.auth_type, { shouldDirty: true });
+    if (next.auth_params) setValue('auth_params', next.auth_params, { shouldDirty: true });
+    if (next.body_mode) setValue('body_mode', next.body_mode, { shouldDirty: true });
+    if (next.body !== undefined) setValue('body', next.body, { shouldDirty: true });
+    setTransformNotice(`Applied preset "${preset.label}".`);
+  }, [getValues, selectedPresetId, setValue]);
+
+  const handleApplyBodySnippet = useCallback(() => {
+    if (!selectedBodySnippetId) return;
+    const snippet = getBodySnippetById(selectedBodySnippetId);
+    if (!snippet) return;
+    const current = getValues('body') || '';
+    const combined = current.trim().length ? `${current}\n${snippet.text}` : snippet.text;
+    setValue('body', combined, { shouldDirty: true });
+    setValue('body_mode', snippet.mode, { shouldDirty: true });
+    setTransformNotice(`Inserted snippet "${snippet.label}".`);
+  }, [getValues, selectedBodySnippetId, setValue]);
+
+  const applyRevisionSnapshot = useCallback(
+    (snapshot: FormValues, notice: string) => {
+      if (!activeRequestId) return;
+      applyingRevisionRef.current = true;
+      reset(snapshot);
+      setRequestDirty(activeRequestId, true);
+      setSaveState('unsaved');
+      setTransformNotice(notice);
+      window.setTimeout(() => {
+        applyingRevisionRef.current = false;
+      }, 0);
+    },
+    [activeRequestId, reset, setRequestDirty],
+  );
+
+  const handleUndo = useCallback(() => {
+    if (!activeRequestId) return;
+    const snapshot = undoRevision(activeRequestId);
+    if (!snapshot) return;
+    applyRevisionSnapshot(snapshot, 'Undo applied.');
+  }, [activeRequestId, applyRevisionSnapshot, undoRevision]);
+
+  const handleRedo = useCallback(() => {
+    if (!activeRequestId) return;
+    const snapshot = redoRevision(activeRequestId);
+    if (!snapshot) return;
+    applyRevisionSnapshot(snapshot, 'Redo applied.');
+  }, [activeRequestId, applyRevisionSnapshot, redoRevision]);
 
   if (isLocked) {
     return (
@@ -696,115 +752,50 @@ export const RequestEditor = () => {
 
   return (
     <div className="h-full flex flex-col">
-      {/* URL Bar */}
-      <div className="p-4 border-b border-border flex gap-2 bg-card">
-        <select
-          className="bg-white border border-input rounded px-3 py-2 text-sm font-mono font-bold focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-          {...register('method')}
-        >
-          <option value="GET">GET</option>
-          <option value="POST">POST</option>
-          <option value="PUT">PUT</option>
-          <option value="DELETE">DELETE</option>
-        </select>
-
-        <input
-          className="flex-1 bg-white border border-input rounded px-4 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-          {...urlField}
-          ref={(el) => {
-            urlField.ref(el);
-            urlInputRef.current = el;
-          }}
-          data-req-field="url"
-          placeholder="http://localhost:8000/api..."
-          onDoubleClick={openUrlEditor}
-          onFocus={() => setIsEditingUrl(true)}
-          onBlur={() => setIsEditingUrl(false)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              void handleRun();
-            }
-          }}
-        />
-        <div
-          className={cn(
-            'px-2 py-2 text-xs rounded border font-medium',
-            saveState === 'saved' && 'bg-success/10 text-success border-success/30',
-            saveState === 'unsaved' && 'bg-muted text-muted-foreground border-border',
-            saveState === 'saving' && 'bg-primary/10 text-primary border-primary/30',
-            saveState === 'error' && 'bg-destructive/10 text-destructive border-destructive/30',
-          )}
-          title="Save state"
-        >
-          {saveState === 'saved' ? 'Saved' : saveState === 'unsaved' ? 'Unsaved' : saveState === 'saving' ? 'Saving…' : 'Save failed'}
-        </div>
-
-        <button
-          className="px-3 py-2 text-xs rounded border border-border bg-white hover:bg-muted transition-colors font-medium"
-          onClick={openUrlEditor}
-          type="button"
-        >
-          Expand
-        </button>
-
-        <button
-          className="bg-muted hover:bg-secondary text-foreground px-4 py-2 rounded flex items-center gap-2 text-sm transition-colors disabled:opacity-50 font-medium"
-          onClick={handleSave}
-          title="Save Changes (Cmd+S)"
-          type="button"
-          disabled={isSaving || isLocked}
-        >
-          <Save size={14} />
-        </button>
-        <button
-          className="bg-success hover:opacity-90 text-success-foreground px-5 py-2 rounded flex items-center gap-2 text-sm font-semibold transition-opacity"
-          onClick={handleRun}
-          type="button"
-          disabled={isLocked || activeRequestRunning}
-        >
-          <Play size={14} /> {activeRequestRunning ? 'Sending…' : 'Send'}
-        </button>
-      </div>
+      <RequestTopBar
+        methodField={methodField}
+        urlField={urlField}
+        urlInputRef={urlInputRef}
+        saveState={saveState}
+        isSaving={isSaving}
+        isLocked={isLocked}
+        activeRequestRunning={activeRequestRunning}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        unresolvedVariableCount={unresolvedVariableCount}
+        unresolvedVariableNames={unresolvedVariableNames}
+        urlUnresolvedVariables={urlUnresolvedVariables}
+        variableSuggestions={variableSuggestions}
+        onOpenUrlEditor={openUrlEditor}
+        onUrlFocus={() => setIsEditingUrl(true)}
+        onUrlBlur={(value) => {
+          setIsEditingUrl(false);
+          syncQueryParamsFromUrl(value, false);
+        }}
+        onRun={() => void handleRun()}
+        onSave={() => void handleSave()}
+        onUndo={() => void handleUndo()}
+        onRedo={() => void handleRedo()}
+      />
       {validationError && (
         <div className="px-4 py-2 text-xs bg-destructive/10 text-destructive border-b border-destructive/30">
           {validationError}
         </div>
       )}
-      <Dialog open={showUrlEditor} onOpenChange={(isOpen) => !isOpen && closeUrlEditor()}>
-        <DialogContent className="max-w-4xl">
-          <DialogHeader>
-            <DialogTitle>Edit URL</DialogTitle>
-          </DialogHeader>
-          <div className="p-4">
-            <textarea
-              className="w-full h-[28rem] border border-input rounded px-4 py-4 font-mono text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-              value={urlDraft}
-              onChange={(e) => {
-                setUrlDraft(e.target.value);
-                setUrlDraftDirty(true);
-              }}
-              autoFocus
-            />
-          </div>
-          <DialogFooter>
-            <button
-              className="px-4 py-2 text-sm rounded border border-border bg-white hover:bg-muted transition-colors font-medium"
-              onClick={closeUrlEditor}
-              type="button"
-            >
-              Cancel
-            </button>
-            <button
-              className="px-4 py-2 text-sm rounded bg-primary text-primary-foreground hover:opacity-90 transition-opacity font-medium"
-              onClick={saveAndCloseUrlEditor}
-              type="button"
-            >
-              Save & Close
-            </button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <UrlEditorDialog
+        open={showUrlEditor}
+        urlDraft={urlDraft}
+        encodedPreview={encodedUrlPreview}
+        variableSuggestions={variableSuggestions}
+        onDraftChange={(next) => {
+          setUrlDraft(next);
+          setUrlDraftDirty(true);
+        }}
+        onDecode={decodeUrlDraftForEdit}
+        onPrettyQuery={prettyFormatUrlDraft}
+        onClose={closeUrlEditor}
+        onSave={saveAndCloseUrlEditor}
+      />
 
       {/* Tab Navigation */}
       <div className="flex border-b border-border">
@@ -828,312 +819,89 @@ export const RequestEditor = () => {
       {/* Tab Content */}
       <div className="flex-1 overflow-auto bg-white relative">
         {activeTab === 'body' && (
-          <div className="p-3 space-y-3">
-            <div className="flex items-center gap-4 text-sm flex-wrap">
-              <span className="text-xs uppercase text-muted-foreground">Body type</span>
-              {[
-                { key: 'raw', label: 'Raw' },
-                { key: 'json', label: 'JSON' },
-                { key: 'form-urlencoded', label: 'x-www-form-urlencoded' },
-                { key: 'form-data', label: 'form-data' },
-                { key: 'binary', label: 'binary' },
-              ].map((opt) => (
-                <label
-                  key={opt.key}
-                  className={cn(
-                    'flex items-center gap-2 px-2 py-1 rounded border cursor-pointer',
-                    bodyMode === opt.key ? 'border-primary bg-muted/40' : 'border-border hover:bg-muted/30'
-                  )}
-                >
-                  <input
-                    type="radio"
-                    className="accent-primary"
-                    checked={bodyMode === opt.key}
-                    onChange={() => setValue('body_mode', opt.key as any, { shouldDirty: true })}
-                  />
-                  <span className="text-xs">{opt.label}</span>
-                </label>
-              ))}
-              <button
-                type="button"
-                className={cn(
-                  "text-[11px] px-2 py-1 rounded border transition-colors",
-                  secretBody ? "bg-amber-50 border-amber-300 text-amber-700" : "border-border text-muted-foreground hover:bg-muted/40"
-                )}
-                onClick={() => setValue('secret_body', !secretBody, { shouldDirty: true })}
-              >
-                {secretBody ? 'Body marked secret' : 'Mark body as secret'}
-              </button>
-            </div>
-            {(bodyMode === 'raw' || bodyMode === 'json') && (
-              <Editor
-                value={bodyValue}
-                onValueChange={(code) => setValue('body', code, { shouldDirty: true })}
-                highlight={(code) => highlight(code, languages.json, 'json')}
-                padding={16}
-                style={{ fontFamily: '"Fira code", "Fira Mono", monospace', fontSize: 14, minHeight: '100%' }}
-                className="min-h-full border border-input rounded bg-white focus-within:ring-2 focus-within:ring-primary focus-within:border-primary"
-              />
-            )}
-            {bodyMode === 'form-urlencoded' && (
-              <FormTable
-                rows={watch('form_body')}
-                onChange={(rows) => setValue('form_body', rows, { shouldDirty: true })}
-                allowFile={false}
-                showSecrets
-                tableId="form-body"
-                duplicateKeyIndexes={formDuplicateIndexes}
-                missingKeyIndexes={formMissingKeyIndexes}
-              />
-            )}
-            {bodyMode === 'form-data' && (
-              <FormDataTable
-                rows={watch('form_body')}
-                onChange={(rows) => setValue('form_body', rows, { shouldDirty: true })}
-                duplicateKeyIndexes={formDuplicateIndexes}
-                missingKeyIndexes={formMissingKeyIndexes}
-              />
-            )}
-            {bodyMode === 'binary' && (
-              <div className="space-y-2">
-                <p className="text-xs text-muted-foreground">
-                  Send a single binary payload. Choose a file path (desktop) or attach inline (browser).
-                </p>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    className="flex-1 bg-transparent border border-input rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-                    placeholder="File path or leave blank to pick"
-                    value={binary?.file_path || ''}
-                    data-req-field="binary-path"
-                    onChange={(e) => setValue('binary', { ...(binary || {}), file_path: e.target.value, file_inline: undefined }, { shouldDirty: true })}
-                  />
-                  <BinaryPickerButton
-                    onPick={(payload) => setValue('binary', payload, { shouldDirty: true })}
-                    disabled={isLocked}
-                    current={binary}
-                  />
-                </div>
-                {binary?.file_name && !binary.file_path && (
-                  <div className="text-[11px] text-muted-foreground px-1">
-                    Attached inline: {binary.file_name}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <RequestBodyTab
+            bodyMode={bodyMode}
+            bodyValue={bodyValue}
+            secretBody={secretBody}
+            binary={binary}
+            formBodyRows={watch('form_body')}
+            formUnresolvedKeyIndexes={formUnresolvedKeyIndexes}
+            formUnresolvedValueIndexes={formUnresolvedValueIndexes}
+            variableSuggestions={variableSuggestions}
+            bodySnippets={BODY_SNIPPETS.map((s) => ({ id: s.id, label: s.label }))}
+            selectedSnippetId={selectedBodySnippetId}
+            unresolvedVariableCount={unresolvedVariableCount}
+            unresolvedVariableNames={unresolvedVariableNames}
+            transformNotice={transformNotice}
+            isLocked={isLocked}
+            formDuplicateIndexes={formDuplicateIndexes}
+            formMissingIndexes={formMissingKeyIndexes}
+            onBodyModeChange={handleBodyModeChange}
+            onBodyChange={(value) => setValue('body', value, { shouldDirty: true })}
+            onSmartPaste={() => void handleSmartPaste()}
+            onConvertBodyToTable={handleConvertBodyToTable}
+            onConvertTableToBody={handleConvertTableToBody}
+            onSnippetSelect={setSelectedBodySnippetId}
+            onApplySnippet={handleApplyBodySnippet}
+            onSecretBodyToggle={() => setValue('secret_body', !secretBody, { shouldDirty: true })}
+            onFormBodyChange={(rows) => setValue('form_body', rows, { shouldDirty: true })}
+            onBinaryChange={(next) => setValue('binary', next, { shouldDirty: true })}
+          />
         )}
         {activeTab === 'headers' && (
-          <HeadersTab
+          <RequestHeadersTab
             control={control}
             onHeadersChange={(headers) => setValue('headers', headers, { shouldDirty: true })}
             duplicateKeyIndexes={headerDuplicateIndexes}
             missingKeyIndexes={headerMissingKeyIndexes}
+            unresolvedKeyIndexes={headerUnresolvedKeyIndexes}
+            unresolvedValueIndexes={headerUnresolvedValueIndexes}
+            variableSuggestions={variableSuggestions}
           />
         )}
         {activeTab === 'params' && (
-          <div className="p-4 bg-card h-full">
-            <div className="text-xs uppercase text-muted-foreground mb-2">Query Parameters</div>
-            <p className="text-xs text-muted-foreground mb-3">
-              Add key/value pairs to append to the URL. Disabled rows are ignored.
-            </p>
-            <FormTable
-              rows={queryParams || []}
-              onChange={(rows) =>
-                setValue(
-                  'query_params',
-                  rows.map((r) => ({ ...r, value: r.value ?? '' })),
-                  { shouldDirty: true },
-                )
-              }
-              // Allow modal editing of long values
-              onEditRow={(idx) => {
-                const row = (queryParams || [])[idx];
-                if (!row) return;
-                setParamEditor({ index: idx, key: row.key || '', value: row.value || '' });
-              }}
-              showSecrets
-              tableId="params"
-              duplicateKeyIndexes={queryDuplicateIndexes}
-              missingKeyIndexes={queryMissingKeyIndexes}
-            />
-          </div>
+          <RequestParamsTab
+            rows={queryParams || []}
+            onChange={(rows) => applyQueryParams(rows, true)}
+            onEditRow={(idx) => {
+              const row = (queryParams || [])[idx];
+              if (!row) return;
+              setParamEditor({ index: idx, key: row.key || '', value: row.value || '' });
+            }}
+            duplicateKeyIndexes={queryDuplicateIndexes}
+            missingKeyIndexes={queryMissingKeyIndexes}
+            unresolvedKeyIndexes={queryUnresolvedKeyIndexes}
+            unresolvedValueIndexes={queryUnresolvedValueIndexes}
+            variableSuggestions={variableSuggestions}
+          />
         )}
         {activeTab === 'auth' && (
-          <div className="p-4 bg-card h-full space-y-4">
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  className="accent-primary"
-                  checked={authType === 'none'}
-                  onChange={() => setValue('auth_type', 'none', { shouldDirty: true })}
-                />
-                None
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  className="accent-primary"
-                  checked={authType === 'basic'}
-                  onChange={() => setValue('auth_type', 'basic', { shouldDirty: true })}
-                />
-                Basic
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  className="accent-primary"
-                  checked={authType === 'bearer'}
-                  onChange={() => setValue('auth_type', 'bearer', { shouldDirty: true })}
-                />
-                Bearer
-              </label>
-            </div>
-
-            {authType === 'basic' && (
-              <div className="grid grid-cols-2 gap-3 max-w-2xl">
-                <div className="flex flex-col gap-1">
-                  <label className="text-xs uppercase text-muted-foreground">Username</label>
-                  <input
-                    className="bg-white border border-input rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                    value={authParams?.username || ''}
-                    onChange={(e) =>
-                      setValue(
-                        'auth_params',
-                        { ...authParams, username: e.target.value },
-                        { shouldDirty: true },
-                      )
-                    }
-                  />
-                  <label className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1">
-                    <input
-                      type="checkbox"
-                      className="accent-primary"
-                      checked={Boolean(secretAuthParams?.username)}
-                      onChange={(e) =>
-                        setValue('secret_auth_params', { ...secretAuthParams, username: e.target.checked }, { shouldDirty: true })
-                      }
-                    />
-                    Mark username as secret
-                  </label>
-                </div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-xs uppercase text-muted-foreground">Password</label>
-                  <input
-                    type="password"
-                    className="bg-white border border-input rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                    value={authParams?.password || ''}
-                    onChange={(e) =>
-                      setValue(
-                        'auth_params',
-                        { ...authParams, password: e.target.value },
-                        { shouldDirty: true },
-                      )
-                    }
-                  />
-                  <label className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1">
-                    <input
-                      type="checkbox"
-                      className="accent-primary"
-                      checked={Boolean(secretAuthParams?.password ?? true)}
-                      onChange={(e) =>
-                        setValue('secret_auth_params', { ...secretAuthParams, password: e.target.checked }, { shouldDirty: true })
-                      }
-                    />
-                    Mark password as secret
-                  </label>
-                </div>
-              </div>
-            )}
-
-            {authType === 'bearer' && (
-              <div className="max-w-2xl">
-                <label className="text-xs uppercase text-muted-foreground">Token</label>
-                <input
-                  className="w-full bg-white border border-input rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                  value={authParams?.token || ''}
-                  onChange={(e) =>
-                    setValue('auth_params', { ...authParams, token: e.target.value }, { shouldDirty: true })
-                  }
-                  placeholder="eyJhbGciOi..."
-                />
-                <label className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1">
-                  <input
-                    type="checkbox"
-                    className="accent-primary"
-                    checked={Boolean(secretAuthParams?.token ?? true)}
-                    onChange={(e) =>
-                      setValue('secret_auth_params', { ...secretAuthParams, token: e.target.checked }, { shouldDirty: true })
-                    }
-                  />
-                  Mark token as secret
-                </label>
-              </div>
-            )}
-
-            {authType === 'none' && (
-              <p className="text-xs text-muted-foreground">
-                No Authorization header will be added. Use Basic or Bearer to auto-insert the header.
-              </p>
-            )}
-          </div>
+          <RequestAuthTab
+            authType={authType}
+            authParams={authParams || {}}
+            secretAuthParams={secretAuthParams || {}}
+            onAuthTypeChange={(next) => setValue('auth_type', next, { shouldDirty: true })}
+            onAuthParamsChange={(next) => setValue('auth_params', next, { shouldDirty: true })}
+            onSecretAuthParamsChange={(next) => setValue('secret_auth_params', next, { shouldDirty: true })}
+          />
         )}
         {activeTab === 'settings' && (
-          <div className="bg-card h-full p-4">
-            <div className="mb-6">
-              <h3 className="text-sm font-bold text-muted-foreground mb-2">Auto-Magic Extraction</h3>
-              <p className="text-xs text-muted-foreground mb-4">
-                Automatically capture data from the JSON response and save it to the Environment.
-              </p>
-
-              <div className="space-y-2">
-                {ruleFields.map((field, idx) => (
-                  <div
-                    key={field.id}
-                    className="flex gap-2 items-center bg-muted/10 p-2 rounded border border-border"
-                  >
-                    <div className="flex-1">
-                      <div className="text-[10px] uppercase text-muted-foreground">Source (JMESPath)</div>
-                      <input
-                        className="w-full bg-transparent font-mono text-sm focus:outline-none"
-                        {...register(`extract_rules.${idx}.source_path`)}
-                      />
-                    </div>
-                    <div className="text-muted-foreground">→</div>
-                    <div className="flex-1">
-                      <div className="text-[10px] uppercase text-muted-foreground">Target Variable</div>
-                      <input
-                        className="w-full bg-transparent font-mono text-sm text-yellow-500 focus:outline-none"
-                        {...register(`extract_rules.${idx}.target_variable`)}
-                      />
-                    </div>
-                    <button
-                      onClick={() => removeRule(idx)}
-                      className="text-destructive hover:bg-destructive/10 p-2 rounded transition-colors"
-                      type="button"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-
-                <button
-                  onClick={() =>
-                    appendRule({
-                      id: `rule-${Date.now()}`,
-                      source_path: 'id',
-                      target_variable: 'extracted_value',
-                    })
-                  }
-                  className="w-full py-2 flex items-center justify-center gap-2 border border-dashed border-border rounded hover:bg-muted/20 text-xs text-muted-foreground"
-                  type="button"
-                >
-                  <Plus size={14} /> Add Extraction Rule
-                </button>
-              </div>
-            </div>
-          </div>
+          <RequestSettingsTab
+            ruleFields={ruleFields}
+            register={register}
+            appendRule={appendRule}
+            removeRule={removeRule}
+            templateOptions={templates.map((tpl) => ({ id: tpl.id, name: tpl.name }))}
+            selectedTemplateId={selectedTemplateId}
+            presetOptions={REQUEST_PRESETS.map((preset) => ({ id: preset.id, label: preset.label }))}
+            selectedPresetId={selectedPresetId}
+            onTemplateSelect={setSelectedTemplateId}
+            onApplyTemplate={handleApplyTemplate}
+            onSaveTemplate={() => setTemplateNamePromptOpen(true)}
+            onDeleteTemplate={handleDeleteTemplate}
+            onPresetSelect={setSelectedPresetId}
+            onApplyPreset={handleApplyPreset}
+          />
         )}
       </div>
 
@@ -1158,9 +926,19 @@ export const RequestEditor = () => {
             key: paramEditor.key,
             value: paramEditor.value,
           };
-          setValue('query_params', rows, { shouldDirty: true });
+          applyQueryParams(rows, true);
           setParamEditor(null);
         }}
+      />
+      <PromptDialog
+        open={templateNamePromptOpen}
+        title="Save Request Template"
+        message="Template name"
+        placeholder="e.g. OAuth Token Request"
+        defaultValue={getValues('name') || 'New Template'}
+        confirmLabel="Save Template"
+        onConfirm={handleSaveTemplate}
+        onCancel={() => setTemplateNamePromptOpen(false)}
       />
     </div>
   );

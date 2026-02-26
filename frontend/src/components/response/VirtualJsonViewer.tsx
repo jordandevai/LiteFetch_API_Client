@@ -11,11 +11,6 @@ export const VirtualJsonViewer = ({ data }: { data: JsonValue }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    setExpanded(new Set(['$']));
-    setScrollTop(0);
-  }, [data]);
-
-  useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 

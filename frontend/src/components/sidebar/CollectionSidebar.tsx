@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Folder, ChevronRight, ChevronDown, Plus, Copy, Pencil, Trash2, FilePlus, FolderPlus, Play, Move } from 'lucide-react';
 import { useActiveRequestStore } from '../../stores/useActiveRequestStore';
 import { CollectionFolder, HttpRequest } from '../../lib/api';
@@ -73,11 +73,13 @@ const TreeItem = ({
   const isOpen = 'items' in item ? isFolderOpen(item.id) : false;
   const setActiveRequestId = useActiveRequestStore((s) => s.setActiveRequestId);
   const activeId = useActiveRequestStore((s) => s.activeRequestId);
+  const dirtyByRequest = useActiveRequestStore((s) => s.dirtyByRequest);
 
   const isFolder = 'items' in item;
   const paddingLeft = `${depth * 12 + 12}px`;
   const isDropTarget = dragOverId === item.id;
   const dropClass = isDropTarget ? "bg-primary/15 border-primary" : "hover:bg-secondary border-transparent hover:border-primary/30";
+  const isRequestDirty = !isFolder && Boolean(dirtyByRequest[item.id]);
 
   if (isFolder) {
     return (
@@ -237,7 +239,10 @@ const TreeItem = ({
           )}>
             {item.method}
           </span>
-          <span className="flex-1 opacity-80 pr-1">{item.name}</span>
+          <span className="flex-1 opacity-80 pr-1 flex items-center gap-1 min-w-0">
+            <span className="truncate">{item.name}</span>
+            {isRequestDirty && <span className="text-[12px] leading-none text-amber-600">*</span>}
+          </span>
           <span className="text-[10px] font-mono rounded px-1 py-0.5 bg-muted text-muted-foreground shrink-0">
             {lastResults[item.id]
               ? lastResults[item.id].status_code === 0
@@ -303,8 +308,6 @@ export const CollectionSidebar = () => {
   const { data: uiState } = useUiStateQuery();
   const { mutate: saveUiState } = useSaveUiStateMutation();
   const { setResult, setRequestRunning, setActiveRequestId } = useActiveRequestStore();
-  const defaultConcurrency = useRunSettingsStore((s) => s.defaultConcurrency);
-  const setDefaultConcurrency = useRunSettingsStore((s) => s.setDefaultConcurrency);
   const getConcurrencyForFolder = useRunSettingsStore((s) => s.getConcurrencyForFolder);
   const { data: lastResults } = useLastResultsQuery();
   // reserved for future visual indicator per-folder running
@@ -333,7 +336,7 @@ export const CollectionSidebar = () => {
     setBanner({ message, tone });
     window.setTimeout(() => setBanner(null), 2500);
   };
-  const [hoverExpandTimer, setHoverExpandTimer] = useState<number | null>(null);
+  const hoverExpandTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!activeId && collectionsMeta && collectionsMeta.length > 0) {
@@ -348,13 +351,13 @@ export const CollectionSidebar = () => {
     }
   }, [collectionsMeta, createCollectionMeta, isCreatingCollection, setActiveId]);
 
-  const isFolderOpen = (id: string) => !!uiState?.openFolders?.includes(id);
-  const toggleFolder = (id: string) => {
+  const isFolderOpen = useCallback((id: string) => !!uiState?.openFolders?.includes(id), [uiState?.openFolders]);
+  const toggleFolder = useCallback((id: string) => {
     const current = new Set(uiState?.openFolders || []);
     if (current.has(id)) current.delete(id);
     else current.add(id);
     saveUiState({ openFolders: Array.from(current) });
-  };
+  }, [saveUiState, uiState?.openFolders]);
 
   const getChildCount = (parentId: string | null) => {
     if (!collection) return 0;
@@ -367,23 +370,25 @@ export const CollectionSidebar = () => {
   // Auto-expand a folder if dragging over while closed
   useEffect(() => {
     if (!dragOverId) {
-      if (hoverExpandTimer) {
-        window.clearTimeout(hoverExpandTimer);
-        setHoverExpandTimer(null);
+      if (hoverExpandTimerRef.current) {
+        window.clearTimeout(hoverExpandTimerRef.current);
+        hoverExpandTimerRef.current = null;
       }
       return;
     }
     const node = idToNode.get(dragOverId);
     if (!node || !('items' in node.item)) return;
     if (isFolderOpen(node.id)) return;
-    const timer = window.setTimeout(() => {
+    hoverExpandTimerRef.current = window.setTimeout(() => {
       toggleFolder(node.id);
     }, 350);
-    setHoverExpandTimer(timer);
     return () => {
-      window.clearTimeout(timer);
+      if (hoverExpandTimerRef.current) {
+        window.clearTimeout(hoverExpandTimerRef.current);
+        hoverExpandTimerRef.current = null;
+      }
     };
-  }, [dragOverId, idToNode, isFolderOpen, toggleFolder, hoverExpandTimer]);
+  }, [dragOverId, idToNode, isFolderOpen, toggleFolder]);
 
   const canMoveTo = (id: string, targetParentId: string | null) => {
     let cursor = targetParentId;
@@ -676,21 +681,6 @@ export const CollectionSidebar = () => {
           >
             <FolderPlus size={14} /> Folder
           </button>
-        </div>
-        <div className="flex items-center gap-2 pt-1">
-          <span className="text-[11px] text-muted-foreground uppercase tracking-wide">Pool</span>
-          <select
-            className="text-xs bg-white border border-border rounded px-2 py-1"
-            value={defaultConcurrency}
-            onChange={(e) => setDefaultConcurrency(Number(e.target.value))}
-          >
-            {[1, 2, 4, 8, 16].map((value) => (
-              <option key={value} value={value}>
-                {value}x
-              </option>
-            ))}
-          </select>
-          <span className="text-[11px] text-muted-foreground">folder runs</span>
         </div>
       </div>
       {banner && (

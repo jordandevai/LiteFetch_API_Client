@@ -55,6 +55,7 @@ export const WorkspaceRuntimeProvider = ({ children }: { children: ReactNode }) 
   );
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useWorkspaceRuntime = () => {
   const ctx = useContext(WorkspaceRuntimeContext);
   if (!ctx) throw new Error('useWorkspaceRuntime must be used within WorkspaceRuntimeProvider');

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { X, Plus, Pencil, Trash2 } from 'lucide-react';
 import { useEnvironmentQuery } from '../../hooks/useEnvironmentData';
 import { useCookiesQuery, useDeleteCookieMutation, useUpsertCookieMutation } from '../../hooks/useCookies';
@@ -37,16 +37,19 @@ const fromInputDate = (value: string) => {
 export const CookieManager = ({ open, onClose }: CookieManagerProps) => {
   const { data: envData } = useEnvironmentQuery();
   const envOptions = useMemo(() => Object.keys(envData?.envs || {}), [envData]);
-  const [envId, setEnvId] = useState<string | null>(null);
+  const [envOverride, setEnvOverride] = useState<string | null>(null);
+  const activeEnvId = envData?.active_env || null;
+  const envId =
+    envOverride && envData?.envs?.[envOverride]
+      ? envOverride
+      : activeEnvId && envData?.envs?.[activeEnvId]
+        ? activeEnvId
+        : envOptions[0] || null;
   const [status, setStatus] = useState<{ message: string; tone: 'success' | 'error' | 'info' } | null>(null);
   const showStatus = (message: string, tone: 'success' | 'error' | 'info' = 'info') => {
     setStatus({ message, tone });
     window.setTimeout(() => setStatus(null), 2500);
   };
-
-  useEffect(() => {
-    if (envData) setEnvId(envData.active_env);
-  }, [envData]);
 
   const { data: cookies = [], isLoading } = useCookiesQuery(envId);
   const upsertCookie = useUpsertCookieMutation(envId);
@@ -56,20 +59,22 @@ export const CookieManager = ({ open, onClose }: CookieManagerProps) => {
   const [form, setForm] = useState<StoredCookie>(blankCookie);
   const [hiddenHttpOnlyValue, setHiddenHttpOnlyValue] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (editing) {
-      setHiddenHttpOnlyValue(editing.http_only ? editing.value : null);
-      setForm({
-        ...blankCookie,
-        ...editing,
-        value: editing.http_only ? '' : editing.value,
-        path: editing.path || '/',
-      });
-    } else {
-      setHiddenHttpOnlyValue(null);
-      setForm(blankCookie);
-    }
-  }, [editing]);
+  const startCreate = () => {
+    setEditing(null);
+    setHiddenHttpOnlyValue(null);
+    setForm(blankCookie);
+  };
+
+  const startEdit = (cookie: StoredCookie) => {
+    setEditing(cookie);
+    setHiddenHttpOnlyValue(cookie.http_only ? cookie.value : null);
+    setForm({
+      ...blankCookie,
+      ...cookie,
+      value: cookie.http_only ? '' : cookie.value,
+      path: cookie.path || '/',
+    });
+  };
 
   const saveCookie = async () => {
     if (!envId) return;
@@ -87,7 +92,7 @@ export const CookieManager = ({ open, onClose }: CookieManagerProps) => {
     };
     await upsertCookie.mutateAsync(payload);
     showStatus(editing ? 'Cookie updated' : 'Cookie added', 'success');
-    setEditing(null);
+    startCreate();
   };
 
   const handleDelete = async (cookie: StoredCookie) => {
@@ -128,7 +133,7 @@ export const CookieManager = ({ open, onClose }: CookieManagerProps) => {
             <select
               className="bg-white border border-border rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
               value={envId || ''}
-              onChange={(e) => setEnvId(e.target.value || null)}
+              onChange={(e) => setEnvOverride(e.target.value || null)}
             >
               {envOptions.map((key) => (
                 <option key={key} value={key}>
@@ -173,7 +178,7 @@ export const CookieManager = ({ open, onClose }: CookieManagerProps) => {
                 <div className="flex items-center gap-2">
                   <button
                     className="px-3 py-1.5 text-sm rounded bg-muted hover:bg-secondary transition-colors font-medium"
-                    onClick={() => setEditing(null)}
+                    onClick={startCreate}
                     type="button"
                   >
                     <Plus size={14} className="inline mr-1" /> Add Cookie
@@ -245,7 +250,7 @@ export const CookieManager = ({ open, onClose }: CookieManagerProps) => {
                                 <div className="flex items-center gap-2">
                                   <button
                                     className="p-1 rounded hover:bg-muted"
-                                    onClick={() => setEditing(cookie)}
+                                    onClick={() => startEdit(cookie)}
                                     type="button"
                                   >
                                     <Pencil size={14} />
@@ -275,7 +280,7 @@ export const CookieManager = ({ open, onClose }: CookieManagerProps) => {
                   {editing && (
                     <button
                       className="text-xs text-muted-foreground hover:text-foreground"
-                      onClick={() => setEditing(null)}
+                      onClick={startCreate}
                       type="button"
                     >
                       New instead
@@ -351,7 +356,7 @@ export const CookieManager = ({ open, onClose }: CookieManagerProps) => {
                 <div className="mt-4 flex items-center justify-end gap-2">
                   <button
                     className="px-3 py-1.5 text-sm rounded border border-border bg-white hover:bg-muted transition-colors"
-                    onClick={() => setEditing(null)}
+                    onClick={startCreate}
                     type="button"
                   >
                     Cancel
