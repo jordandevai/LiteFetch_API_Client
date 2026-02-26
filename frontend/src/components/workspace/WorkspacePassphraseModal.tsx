@@ -226,9 +226,9 @@ export const WorkspacePassphraseModal = () => {
               type="text"
               className="w-full bg-white border border-input rounded px-3 py-2 text-sm font-mono"
               value={path}
+              onChange={(e) => setPath(e.target.value)}
               placeholder="/path/to/workspace"
               disabled={busyUnlock || busySwitch || busyRotate}
-              readOnly
             />
             <div className="flex gap-2">
               <button
@@ -238,6 +238,14 @@ export const WorkspacePassphraseModal = () => {
                 disabled={busyUnlock || busySwitch || busyRotate}
               >
                 Open Folder
+              </button>
+              <button
+                type="button"
+                className="px-3 py-1.5 text-xs rounded border border-border bg-white hover:bg-muted transition-colors disabled:opacity-50"
+                onClick={() => handleSwitch()}
+                disabled={busyUnlock || busySwitch || busyRotate || !path.trim()}
+              >
+                {busySwitch ? 'Switching...' : 'Use Path'}
               </button>
             </div>
             <div className="text-[11px] text-muted-foreground">
